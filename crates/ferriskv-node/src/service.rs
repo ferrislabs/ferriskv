@@ -103,6 +103,7 @@ mod tests {
                 insecure: true,
                 ..Default::default()
             },
+            tls: None,
             shutdown_timeout_secs: 5,
         }
     }

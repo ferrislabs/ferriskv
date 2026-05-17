@@ -5,6 +5,38 @@ use std::sync::Arc;
 use ferriskv_core::Limits;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
+
+impl TlsConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.cert_path.exists() {
+            return Err(format!(
+                "tls.cert_path does not exist: {}",
+                self.cert_path.display()
+            ));
+        }
+        if !self.key_path.exists() {
+            return Err(format!(
+                "tls.key_path does not exist: {}",
+                self.key_path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn load(&self) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let cert = std::fs::read(&self.cert_path)
+            .map_err(|e| format!("read {}: {e}", self.cert_path.display()))?;
+        let key = std::fs::read(&self.key_path)
+            .map_err(|e| format!("read {}: {e}", self.key_path.display()))?;
+        Ok((cert, key))
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthConfig {
     #[serde(default)]
@@ -47,6 +79,8 @@ pub struct NodeConfig {
     pub limits: Limits,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
     #[serde(default = "default_shutdown_secs")]
     pub shutdown_timeout_secs: u64,
 }
@@ -63,7 +97,7 @@ fn default_backend() -> Backend {
 }
 
 fn default_shutdown_secs() -> u64 {
-    30
+    10
 }
 
 impl NodeConfig {
@@ -76,6 +110,9 @@ impl NodeConfig {
         }
         self.limits.validate()?;
         self.auth.validate()?;
+        if let Some(tls) = &self.tls {
+            tls.validate()?;
+        }
         if self.shutdown_timeout_secs == 0 {
             return Err("shutdown_timeout_secs must be > 0".into());
         }
@@ -117,7 +154,8 @@ mod tests {
                 insecure: true,
                 ..Default::default()
             },
-            shutdown_timeout_secs: 30,
+            tls: None,
+            shutdown_timeout_secs: 10,
         }
     }
 
@@ -134,8 +172,9 @@ mod tests {
         assert_eq!(cfg.node_id.as_ref(), "n0");
         assert_eq!(cfg.backend, Backend::Fjall);
         assert_eq!(cfg.limits.max_value_size, 10 * 1024 * 1024);
-        assert_eq!(cfg.shutdown_timeout_secs, 30);
+        assert_eq!(cfg.shutdown_timeout_secs, 10);
         assert!(!cfg.auth.insecure);
+        assert!(cfg.tls.is_none());
     }
 
     #[test]
@@ -201,6 +240,60 @@ mod tests {
         let mut c = base_cfg();
         c.limits.max_value_size = 0;
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn tls_validate_rejects_missing_files() {
+        let tls = TlsConfig {
+            cert_path: PathBuf::from("/does/not/exist.crt"),
+            key_path: PathBuf::from("/does/not/exist.key"),
+        };
+        assert!(tls.validate().is_err());
+    }
+
+    #[test]
+    fn tls_validate_accepts_existing_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferriskv-tls-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert = dir.join("server.crt");
+        let key = dir.join("server.key");
+        std::fs::write(&cert, b"-----BEGIN CERTIFICATE-----\n").unwrap();
+        std::fs::write(&key, b"-----BEGIN PRIVATE KEY-----\n").unwrap();
+        let tls = TlsConfig {
+            cert_path: cert,
+            key_path: key,
+        };
+        assert!(tls.validate().is_ok());
+        let (c, k) = tls.load().unwrap();
+        assert!(!c.is_empty());
+        assert!(!k.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parses_tls_section() {
+        let cfg = parse(
+            r#"
+            node_id = "n0"
+            listen = "127.0.0.1:7100"
+            data_dir = "/tmp/ferriskv-node"
+            coord_endpoints = []
+
+            [tls]
+            cert_path = "/etc/ferriskv/server.crt"
+            key_path = "/etc/ferriskv/server.key"
+        "#,
+        );
+        let tls = cfg.tls.expect("tls section should be present");
+        assert_eq!(tls.cert_path, PathBuf::from("/etc/ferriskv/server.crt"));
+        assert_eq!(tls.key_path, PathBuf::from("/etc/ferriskv/server.key"));
     }
 
     #[test]

@@ -106,6 +106,25 @@ Start the node.
 ./target/release/ferriskv-node --config config/node.toml
 ```
 
+## TLS
+
+The server listens in plaintext by default. To enable TLS, add a `[tls]` section to `node.toml` pointing at a certificate and key in PEM format:
+
+```toml
+[tls]
+cert_path = "/etc/ferriskv/server.crt"
+key_path  = "/etc/ferriskv/server.key"
+```
+
+For local development, [mkcert](https://github.com/FiloSottile/mkcert) is the fastest way to get a trusted certificate:
+
+```sh
+mkcert -install
+mkcert -cert-file server.crt -key-file server.key localhost 127.0.0.1
+```
+
+For production, point at certificates issued by Let's Encrypt or your internal CA. The node does not handle certificate renewal; reload by restarting the process or use a sidecar that watches the file and signals the node.
+
 Use the CLI.
 
 ```sh

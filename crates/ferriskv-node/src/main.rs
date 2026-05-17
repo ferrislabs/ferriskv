@@ -7,11 +7,11 @@ use clap::Parser;
 use ferriskv_auth::JwtVerifier;
 use ferriskv_core::Limits;
 use ferriskv_node::{
-    config::{AuthConfig, Backend},
+    config::{AuthConfig, Backend, TlsConfig},
     AuthInterceptor, GrpcApi, NodeConfig, NodeService,
 };
 use ferriskv_proto::ferris_kv_server::FerrisKvServer;
-use tonic::transport::Server;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -83,7 +83,8 @@ async fn main() -> Result<()> {
                 insecure: true,
                 ..Default::default()
             },
-            shutdown_timeout_secs: 30,
+            tls: None,
+            shutdown_timeout_secs: 10,
         }
     };
 
@@ -101,7 +102,19 @@ async fn main() -> Result<()> {
 
     let interceptor = build_auth_interceptor(&service.config.auth)?;
     let api = GrpcApi::new(Arc::clone(&service));
-    let serve = Server::builder()
+    let mut builder = Server::builder()
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .http2_keepalive_interval(Some(Duration::from_secs(10)))
+        .http2_keepalive_timeout(Some(Duration::from_secs(20)));
+
+    if let Some(tls) = &service.config.tls {
+        builder = builder.tls_config(build_tls(tls)?)?;
+        info!(cert = %tls.cert_path.display(), "TLS enabled");
+    } else {
+        warn!("TLS disabled, server listens in plaintext");
+    }
+
+    let serve = builder
         .add_service(FerrisKvServer::with_interceptor(api, interceptor))
         .serve_with_shutdown(addr, shutdown_signal());
 
@@ -120,6 +133,12 @@ async fn main() -> Result<()> {
 
     info!("shutdown complete");
     Ok(())
+}
+
+fn build_tls(cfg: &TlsConfig) -> Result<ServerTlsConfig> {
+    let (cert, key) = cfg.load().map_err(anyhow::Error::msg)?;
+    let identity = Identity::from_pem(cert, key);
+    Ok(ServerTlsConfig::new().identity(identity))
 }
 
 fn build_auth_interceptor(cfg: &AuthConfig) -> Result<AuthInterceptor> {
