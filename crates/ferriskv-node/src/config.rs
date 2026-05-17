@@ -19,9 +19,7 @@ impl AuthConfig {
             return Ok(());
         }
         if self.jwt_secret.is_none() && self.jwt_secret_path.is_none() {
-            return Err(
-                "auth: set insecure=true or provide jwt_secret/jwt_secret_path".into(),
-            );
+            return Err("auth: set insecure=true or provide jwt_secret/jwt_secret_path".into());
         }
         Ok(())
     }

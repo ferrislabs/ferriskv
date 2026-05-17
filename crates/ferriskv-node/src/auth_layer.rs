@@ -151,7 +151,9 @@ mod tests {
         let token = make_token(secret, "alice", &["read", "write"]);
         let v = Arc::new(JwtVerifier::new_hs256(secret));
         let mut int = AuthInterceptor::with_verifier(v);
-        let req = int.call(req_with_header(&format!("Bearer {token}"))).unwrap();
+        let req = int
+            .call(req_with_header(&format!("Bearer {token}")))
+            .unwrap();
         let p = req.extensions().get::<Principal>().unwrap();
         match p {
             Principal::Authenticated(c) => {
@@ -170,7 +172,9 @@ mod tests {
         let token = make_token(secret, "alice", &["admin"]);
         let v = Arc::new(JwtVerifier::new_hs256(secret));
         let mut int = AuthInterceptor::with_verifier(v);
-        let req = int.call(req_with_header(&format!("Bearer {token}"))).unwrap();
+        let req = int
+            .call(req_with_header(&format!("Bearer {token}")))
+            .unwrap();
         let p = req.extensions().get::<Principal>().unwrap();
         assert!(p.allows("read"));
         assert!(p.allows("write"));
@@ -183,7 +187,9 @@ mod tests {
         let token = make_token(b"secret-a", "alice", &["read"]);
         let v = Arc::new(JwtVerifier::new_hs256(b"secret-b"));
         let mut int = AuthInterceptor::with_verifier(v);
-        let err = int.call(req_with_header(&format!("Bearer {token}"))).unwrap_err();
+        let err = int
+            .call(req_with_header(&format!("Bearer {token}")))
+            .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }
