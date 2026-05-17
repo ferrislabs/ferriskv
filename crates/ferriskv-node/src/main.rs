@@ -20,18 +20,49 @@ use tracing_subscriber::EnvFilter;
 struct Args {
     #[arg(long, default_value = "config/node.toml")]
     config: PathBuf,
+
+    #[command(flatten)]
+    log: LogArgs,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct LogArgs {
+    #[arg(
+        long = "log-filter",
+        env = "LOG_FILTER",
+        name = "LOG_FILTER",
+        long_help = "The log filter to use\nhttps://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives",
+        default_value = "info"
+    )]
+    pub filter: String,
+
+    #[arg(
+        long = "log-json",
+        env = "LOG_JSON",
+        name = "LOG_JSON",
+        long_help = "Whether to log in JSON format"
+    )]
+    pub json: bool,
+}
+
+fn init_logging(args: &LogArgs) -> Result<()> {
+    let filter = EnvFilter::try_new(&args.filter)
+        .with_context(|| format!("invalid log filter '{}'", args.filter))?;
+    if args.json {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .json()
-        .init();
-
     let args = Args::parse();
+    init_logging(&args.log)?;
 
     let cfg = if args.config.exists() {
         let raw = ::config::Config::builder()

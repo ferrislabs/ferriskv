@@ -12,6 +12,7 @@ use ferriskv_proto::{
 use futures::stream::Iter;
 use tonic::{Request, Response, Status};
 
+use crate::audit;
 use crate::auth_layer::Principal;
 use crate::service::NodeService;
 
@@ -192,11 +193,18 @@ impl FerrisKv for GrpcApi {
     async fn put(&self, req: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_WRITE)?;
+        let principal = req
+            .extensions()
+            .get::<Principal>()
+            .cloned()
+            .unwrap_or(Principal::Anonymous);
         let r = req.into_inner();
         self.enforce_key_size(&r.key)?;
         self.enforce_value_size(&r.value)?;
+        let value_size = r.value.len();
         let k = encode_data_key(&r.tenant, &r.key)?;
         self.inner.put(&k, r.value).map_err(to_status)?;
+        audit::write(&principal, &r.tenant, "put", &r.key, value_size);
         Ok(Response::new(PutResponse { version: 0 }))
     }
 
@@ -206,11 +214,17 @@ impl FerrisKv for GrpcApi {
     ) -> Result<Response<DeleteResponse>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_DELETE)?;
+        let principal = req
+            .extensions()
+            .get::<Principal>()
+            .cloned()
+            .unwrap_or(Principal::Anonymous);
         let r = req.into_inner();
         self.enforce_key_size(&r.key)?;
         let k = encode_data_key(&r.tenant, &r.key)?;
         let found = self.inner.get(&k).map_err(to_status)?.is_some();
         self.inner.delete(&k).map_err(to_status)?;
+        audit::write(&principal, &r.tenant, "delete", &r.key, 0);
         Ok(Response::new(DeleteResponse { found }))
     }
 
@@ -271,6 +285,11 @@ impl FerrisKv for GrpcApi {
         if needs_delete {
             authorize(&req, &tenant, PERM_DELETE)?;
         }
+        let principal = req
+            .extensions()
+            .get::<Principal>()
+            .cloned()
+            .unwrap_or(Principal::Anonymous);
         let r = req.into_inner();
         self.enforce_batch_size(r.ops.len())?;
         for op in r.ops {
@@ -278,12 +297,20 @@ impl FerrisKv for GrpcApi {
             if op.op == OP_PUT {
                 self.enforce_value_size(&op.value)?;
             }
+            let value_size = op.value.len();
             let k = encode_data_key(&r.tenant, &op.key)?;
-            match op.op {
-                OP_PUT => self.inner.put(&k, op.value).map_err(to_status)?,
-                OP_DELETE => self.inner.delete(&k).map_err(to_status)?,
+            let op_name = match op.op {
+                OP_PUT => {
+                    self.inner.put(&k, op.value).map_err(to_status)?;
+                    "put"
+                }
+                OP_DELETE => {
+                    self.inner.delete(&k).map_err(to_status)?;
+                    "delete"
+                }
                 other => return Err(Status::invalid_argument(format!("unknown op code {other}"))),
-            }
+            };
+            audit::write(&principal, &r.tenant, op_name, &op.key, value_size);
         }
         Ok(Response::new(BatchResponse { ok: true }))
     }

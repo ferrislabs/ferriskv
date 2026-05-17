@@ -5,6 +5,9 @@ coord_endpoints = []
 backend = "fjall"
 shutdown_timeout_secs = 30
 
+[auth]
+insecure = true
+
 [limits]
 max_key_size = 4096
 max_value_size = 10485760

@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod auth_layer;
 pub mod config;
 pub mod grpc;
