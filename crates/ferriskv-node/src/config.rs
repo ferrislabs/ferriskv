@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct AuthConfig {
     #[serde(default)]
     pub insecure: bool,
-    pub jwt_secret: Option<String>,
-    pub jwt_secret_path: Option<PathBuf>,
+    pub public_key_path: Option<PathBuf>,
 }
 
 impl AuthConfig {
@@ -18,22 +17,21 @@ impl AuthConfig {
         if self.insecure {
             return Ok(());
         }
-        if self.jwt_secret.is_none() && self.jwt_secret_path.is_none() {
-            return Err("auth: set insecure=true or provide jwt_secret/jwt_secret_path".into());
+        if self.public_key_path.is_none() {
+            return Err("auth: set insecure=true or provide public_key_path".into());
         }
         Ok(())
     }
 
-    pub fn load_secret(&self) -> Result<Option<Vec<u8>>, String> {
-        if let Some(literal) = &self.jwt_secret {
-            return Ok(Some(literal.as_bytes().to_vec()));
+    pub fn load_public_key(&self) -> Result<Option<Vec<u8>>, String> {
+        match &self.public_key_path {
+            Some(path) => {
+                let bytes = std::fs::read(path)
+                    .map_err(|e| format!("read public_key_path {}: {e}", path.display()))?;
+                Ok(Some(bytes))
+            }
+            None => Ok(None),
         }
-        if let Some(path) = &self.jwt_secret_path {
-            let bytes = std::fs::read(path)
-                .map_err(|e| format!("read jwt_secret_path {}: {e}", path.display()))?;
-            return Ok(Some(bytes));
-        }
-        Ok(None)
     }
 }
 
@@ -148,12 +146,11 @@ mod tests {
     }
 
     #[test]
-    fn auth_validate_accepts_inline_secret() {
+    fn auth_validate_accepts_public_key_path() {
         let mut c = base_cfg();
         c.auth = AuthConfig {
             insecure: false,
-            jwt_secret: Some("hunter2".into()),
-            jwt_secret_path: None,
+            public_key_path: Some(PathBuf::from("/etc/ferriskv/idp.pub")),
         };
         assert!(c.validate().is_ok());
     }

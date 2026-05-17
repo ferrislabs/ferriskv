@@ -96,12 +96,12 @@ fn build_auth_interceptor(cfg: &AuthConfig) -> Result<AuthInterceptor> {
         warn!("auth disabled (insecure=true); the server trusts every caller");
         return Ok(AuthInterceptor::insecure());
     }
-    let secret = cfg
-        .load_secret()
+    let pem = cfg
+        .load_public_key()
         .map_err(anyhow::Error::msg)?
-        .ok_or_else(|| anyhow!("auth: jwt_secret or jwt_secret_path required when not insecure"))?;
-    let verifier = Arc::new(JwtVerifier::new_hs256(&secret));
-    info!("auth enabled (JWT HS256)");
+        .ok_or_else(|| anyhow!("auth: public_key_path required when not insecure"))?;
+    let verifier = Arc::new(JwtVerifier::new_rs256(&pem)?);
+    info!("auth enabled (JWT RS256, public key from disk)");
     Ok(AuthInterceptor::with_verifier(verifier))
 }
 
