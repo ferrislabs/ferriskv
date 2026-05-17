@@ -77,7 +77,9 @@ pub struct FjallStorage {
 
 impl FjallStorage {
     pub fn open(path: impl AsRef<Path>, partition_name: &str) -> Result<Self> {
-        let keyspace = Config::new(path.as_ref()).open()?;
+        let path = path.as_ref();
+        std::fs::create_dir_all(path)?;
+        let keyspace = Config::new(path).open()?;
         let partition =
             keyspace.open_partition(partition_name, PartitionCreateOptions::default())?;
         Ok(Self {
