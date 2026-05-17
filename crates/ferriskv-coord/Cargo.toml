@@ -1,0 +1,30 @@
+[package]
+name = "ferriskv-coord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ferriskv-coord"
+path = "src/main.rs"
+
+[dependencies]
+ferriskv-core = { workspace = true }
+ferriskv-proto = { workspace = true }
+ferriskv-auth = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+config = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+dashmap = { workspace = true }

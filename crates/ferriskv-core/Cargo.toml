@@ -1,0 +1,19 @@
+[package]
+name = "ferriskv-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }
+blake3 = { workspace = true }
+crc32fast = { workspace = true }
+lz4_flex = { workspace = true }
+fjall = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+bloomfilter = { workspace = true }

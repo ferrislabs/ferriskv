@@ -1,0 +1,205 @@
+syntax = "proto3";
+package ferriskv;
+
+service CoordInternal {
+  rpc RequestVote(VoteRequest) returns (VoteResponse);
+  rpc AppendEntries(AppendRequest) returns (AppendResponse);
+  rpc InstallSnapshot(SnapshotRequest) returns (SnapshotResponse);
+  rpc Join(JoinRequest) returns (JoinResponse);
+}
+
+service NodeInternal {
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  rpc Commit(CommitRequest) returns (CommitResponse);
+  rpc Abort(AbortRequest) returns (AbortResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc Stats(StatsRequest) returns (StatsResponse);
+  rpc Scan(ScanRequest) returns (stream ScanChunk);
+}
+
+service FerrisKV {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Scan(ScanRequest) returns (stream ScanChunk);
+  rpc Watch(WatchRequest) returns (stream WatchEvent);
+  rpc Batch(BatchRequest) returns (BatchResponse);
+}
+
+message VoteRequest {
+  uint64 term = 1;
+  string candidate_id = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+}
+
+message VoteResponse {
+  uint64 term = 1;
+  bool granted = 2;
+}
+
+message LogEntry {
+  uint64 term = 1;
+  uint64 index = 2;
+  bytes payload = 3;
+}
+
+message AppendRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+  uint64 prev_log_index = 3;
+  uint64 prev_log_term = 4;
+  repeated LogEntry entries = 5;
+  uint64 leader_commit = 6;
+}
+
+message AppendResponse {
+  uint64 term = 1;
+  bool success = 2;
+  uint64 match_index = 3;
+}
+
+message SnapshotRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+  uint64 last_included_index = 3;
+  uint64 last_included_term = 4;
+  uint64 offset = 5;
+  bytes data = 6;
+  bool done = 7;
+}
+
+message SnapshotResponse {
+  uint64 term = 1;
+}
+
+message JoinRequest {
+  string node_id = 1;
+  string address = 2;
+  string role = 3;
+}
+
+message JoinResponse {
+  bool accepted = 1;
+  string leader_hint = 2;
+}
+
+message PrepareRequest {
+  string txn_id = 1;
+  string tenant = 2;
+  bytes key = 3;
+  bytes value = 4;
+  uint32 op = 5;
+}
+
+message PrepareResponse {
+  bool ok = 1;
+  string reason = 2;
+}
+
+message CommitRequest {
+  string txn_id = 1;
+}
+
+message CommitResponse {
+  bool ok = 1;
+}
+
+message AbortRequest {
+  string txn_id = 1;
+}
+
+message AbortResponse {
+  bool ok = 1;
+}
+
+message GetRequest {
+  string tenant = 1;
+  bytes key = 2;
+}
+
+message GetResponse {
+  bool found = 1;
+  bytes value = 2;
+  uint64 version = 3;
+}
+
+message PutRequest {
+  string tenant = 1;
+  bytes key = 2;
+  bytes value = 3;
+  uint64 ttl_ms = 4;
+}
+
+message PutResponse {
+  uint64 version = 1;
+}
+
+message DeleteRequest {
+  string tenant = 1;
+  bytes key = 2;
+}
+
+message DeleteResponse {
+  bool found = 1;
+}
+
+message ScanRequest {
+  string tenant = 1;
+  bytes prefix = 2;
+  uint32 limit = 3;
+}
+
+message ScanChunk {
+  repeated KeyValue entries = 1;
+}
+
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message WatchRequest {
+  string tenant = 1;
+  bytes prefix = 2;
+}
+
+message WatchEvent {
+  uint32 kind = 1;
+  bytes key = 2;
+  bytes value = 3;
+  uint64 version = 4;
+}
+
+message BatchRequest {
+  string tenant = 1;
+  repeated BatchOp ops = 2;
+}
+
+message BatchOp {
+  uint32 op = 1;
+  bytes key = 2;
+  bytes value = 3;
+}
+
+message BatchResponse {
+  bool ok = 1;
+}
+
+message PingRequest {
+  string from = 1;
+}
+
+message PingResponse {
+  uint64 epoch_ms = 1;
+}
+
+message StatsRequest {}
+
+message StatsResponse {
+  uint64 keys = 1;
+  uint64 bytes_used = 2;
+  uint64 shards = 3;
+}

@@ -1,0 +1,34 @@
+# Rust build output
+/target
+**/*.rs.bk
+*.pdb
+
+# Local runtime data (created by the binaries on first start)
+/data
+/tmp
+
+# Local configuration (commit examples under config/ if you want)
+/config/*.local.toml
+/config/*.secret.toml
+
+# Coverage reports
+/lcov.info
+/coverage
+*.profraw
+*.profdata
+
+# Editor and IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Direnv and env files
+.envrc
+.env
+.env.local
+
+# Logs
+*.log

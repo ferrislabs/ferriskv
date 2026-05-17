@@ -1,0 +1,20 @@
+[package]
+name = "ferriskv-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ferriskv"
+path = "src/main.rs"
+
+[dependencies]
+ferriskv-proto = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+bytes = { workspace = true }

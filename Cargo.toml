@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ferriskv-core",
+    "crates/ferriskv-proto",
+    "crates/ferriskv-coord",
+    "crates/ferriskv-node",
+    "crates/ferriskv-auth",
+    "crates/ferriskv-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/ferrislabs/ferriskv"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.12", features = ["tls"] }
+tonic-build = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+protox = "0.7"
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["trace", "limit"] }
+fjall = "2"
+bytes = "1"
+dashmap = "6"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+bincode = "2"
+blake3 = "1"
+crc32fast = "1"
+lz4_flex = "0.11"
+aes-gcm = "0.10"
+hkdf = "0.12"
+jsonwebtoken = "9"
+argon2 = "0.5"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+bloomfilter = "3"
+config = { version = "0.15", features = ["toml"] }
+clap = { version = "4.6.1", features = ["derive"] }
+futures = "0.3.32"
+parking_lot = "0.12.5"
+
+ferriskv-core = { path = "crates/ferriskv-core" }
+ferriskv-proto = { path = "crates/ferriskv-proto" }
+ferriskv-auth = { path = "crates/ferriskv-auth" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
