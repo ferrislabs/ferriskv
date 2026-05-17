@@ -12,7 +12,13 @@ use ferriskv_proto::{
 use futures::stream::Iter;
 use tonic::{Request, Response, Status};
 
+use crate::auth_layer::Principal;
 use crate::service::NodeService;
+
+const PERM_READ: &str = "read";
+const PERM_WRITE: &str = "write";
+const PERM_DELETE: &str = "delete";
+const PERM_WATCH: &str = "watch";
 
 const OP_PUT: u32 = 1;
 const OP_DELETE: u32 = 2;
@@ -100,6 +106,28 @@ fn check_tenant(t: &str) -> Result<(), Status> {
     Ok(())
 }
 
+fn authorize<T>(req: &Request<T>, tenant: &str, perm: &str) -> Result<(), Status> {
+    let principal = req
+        .extensions()
+        .get::<Principal>()
+        .ok_or_else(|| Status::internal("auth layer missing"))?;
+
+    if let Some(claim_tenant) = principal.tenant() {
+        if claim_tenant != tenant {
+            return Err(Status::permission_denied(format!(
+                "tenant {tenant} not authorized for this principal"
+            )));
+        }
+    }
+
+    if !principal.allows(perm) {
+        return Err(Status::permission_denied(format!(
+            "permission {perm} required"
+        )));
+    }
+    Ok(())
+}
+
 #[inline]
 fn encode_data_key(tenant: &str, payload: &[u8]) -> Result<Bytes, Status> {
     KeyCodec::encode(tenant, Subspace::Data, payload).map_err(to_status)
@@ -141,8 +169,9 @@ fn next_prefix_bound(prefix: &[u8]) -> Bytes {
 #[tonic::async_trait]
 impl FerrisKv for GrpcApi {
     async fn get(&self, req: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
+        check_tenant(&req.get_ref().tenant)?;
+        authorize(&req, &req.get_ref().tenant, PERM_READ)?;
         let r = req.into_inner();
-        check_tenant(&r.tenant)?;
         self.enforce_key_size(&r.key)?;
         let k = encode_data_key(&r.tenant, &r.key)?;
         let value = self.inner.get(&k).map_err(to_status)?;
@@ -161,8 +190,9 @@ impl FerrisKv for GrpcApi {
     }
 
     async fn put(&self, req: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
+        check_tenant(&req.get_ref().tenant)?;
+        authorize(&req, &req.get_ref().tenant, PERM_WRITE)?;
         let r = req.into_inner();
-        check_tenant(&r.tenant)?;
         self.enforce_key_size(&r.key)?;
         self.enforce_value_size(&r.value)?;
         let k = encode_data_key(&r.tenant, &r.key)?;
@@ -174,8 +204,9 @@ impl FerrisKv for GrpcApi {
         &self,
         req: Request<DeleteRequest>,
     ) -> Result<Response<DeleteResponse>, Status> {
+        check_tenant(&req.get_ref().tenant)?;
+        authorize(&req, &req.get_ref().tenant, PERM_DELETE)?;
         let r = req.into_inner();
-        check_tenant(&r.tenant)?;
         self.enforce_key_size(&r.key)?;
         let k = encode_data_key(&r.tenant, &r.key)?;
         let found = self.inner.get(&k).map_err(to_status)?.is_some();
@@ -186,8 +217,9 @@ impl FerrisKv for GrpcApi {
     type ScanStream = Iter<std::vec::IntoIter<Result<ScanChunk, Status>>>;
 
     async fn scan(&self, req: Request<ScanRequest>) -> Result<Response<Self::ScanStream>, Status> {
+        check_tenant(&req.get_ref().tenant)?;
+        authorize(&req, &req.get_ref().tenant, PERM_READ)?;
         let r = req.into_inner();
-        check_tenant(&r.tenant)?;
         let bounds = encode_data_scan_bounds(&r.tenant, &r.prefix)?;
 
         let iter = self
@@ -221,14 +253,25 @@ impl FerrisKv for GrpcApi {
 
     async fn watch(
         &self,
-        _req: Request<WatchRequest>,
+        req: Request<WatchRequest>,
     ) -> Result<Response<Self::WatchStream>, Status> {
+        check_tenant(&req.get_ref().tenant)?;
+        authorize(&req, &req.get_ref().tenant, PERM_WATCH)?;
         Err(Status::unimplemented("watch not implemented yet"))
     }
 
     async fn batch(&self, req: Request<BatchRequest>) -> Result<Response<BatchResponse>, Status> {
+        check_tenant(&req.get_ref().tenant)?;
+        let needs_write = req.get_ref().ops.iter().any(|o| o.op == OP_PUT);
+        let needs_delete = req.get_ref().ops.iter().any(|o| o.op == OP_DELETE);
+        let tenant = req.get_ref().tenant.clone();
+        if needs_write {
+            authorize(&req, &tenant, PERM_WRITE)?;
+        }
+        if needs_delete {
+            authorize(&req, &tenant, PERM_DELETE)?;
+        }
         let r = req.into_inner();
-        check_tenant(&r.tenant)?;
         self.enforce_batch_size(r.ops.len())?;
         for op in r.ops {
             self.enforce_key_size(&op.key)?;

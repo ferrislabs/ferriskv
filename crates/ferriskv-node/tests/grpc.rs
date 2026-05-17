@@ -4,13 +4,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use ferriskv_auth::{Claims, JwtVerifier};
 use ferriskv_core::Limits;
-use ferriskv_node::{config::Backend, GrpcApi, NodeConfig, NodeService};
+use ferriskv_node::{
+    config::{AuthConfig, Backend},
+    AuthInterceptor, GrpcApi, NodeConfig, NodeService,
+};
 use ferriskv_proto::ferris_kv_client::FerrisKvClient;
 use ferriskv_proto::ferris_kv_server::FerrisKvServer;
 use ferriskv_proto::{
     BatchOp, BatchRequest, DeleteRequest, GetRequest, PutRequest, ScanRequest, WatchRequest,
 };
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use tonic::transport::Server;
 
 fn pick_port() -> SocketAddr {
@@ -40,6 +45,15 @@ async fn spawn_server() -> SocketAddr {
 }
 
 async fn spawn_server_with_limits(limits: Limits) -> SocketAddr {
+    spawn_with(limits, AuthInterceptor::insecure()).await
+}
+
+async fn spawn_secure_server(secret: &[u8]) -> SocketAddr {
+    let verifier = Arc::new(JwtVerifier::new_hs256(secret));
+    spawn_with(Limits::default(), AuthInterceptor::with_verifier(verifier)).await
+}
+
+async fn spawn_with(limits: Limits, interceptor: AuthInterceptor) -> SocketAddr {
     let addr = pick_port();
     let cfg = NodeConfig {
         node_id: Arc::<str>::from("test-node"),
@@ -48,17 +62,52 @@ async fn spawn_server_with_limits(limits: Limits) -> SocketAddr {
         coord_endpoints: Vec::new(),
         backend: Backend::Memory,
         limits,
+        auth: AuthConfig {
+            insecure: true,
+            ..Default::default()
+        },
         shutdown_timeout_secs: 5,
     };
     let service = Arc::new(NodeService::open(cfg).unwrap());
     let api = GrpcApi::new(service);
     tokio::spawn(async move {
         let _ = Server::builder()
-            .add_service(FerrisKvServer::new(api))
+            .add_service(FerrisKvServer::with_interceptor(api, interceptor))
             .serve(addr)
             .await;
     });
     addr
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn make_token(secret: &[u8], tenant: &str, perms: &[&str]) -> String {
+    let claims = Claims {
+        sub: Arc::<str>::from("test-user"),
+        tenant: Arc::<str>::from(tenant),
+        roles: Vec::new(),
+        perms: perms.iter().map(|p| Arc::<str>::from(*p)).collect(),
+        exp: now() + 3600,
+        iss: None,
+    };
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(secret),
+    )
+    .unwrap()
+}
+
+fn with_auth<T>(payload: T, token: &str) -> tonic::Request<T> {
+    let mut r = tonic::Request::new(payload);
+    r.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    r
 }
 
 async fn connect(addr: SocketAddr) -> FerrisKvClient<tonic::transport::Channel> {
@@ -425,4 +474,128 @@ async fn oversize_tenant_is_rejected() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn auth_rejects_missing_token() {
+    let addr = spawn_secure_server(b"hunter2").await;
+    let mut client = connect(addr).await;
+    let err = client
+        .get(GetRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"k"),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn auth_accepts_valid_token() {
+    let secret = b"hunter2";
+    let addr = spawn_secure_server(secret).await;
+    let mut client = connect(addr).await;
+    let token = make_token(secret, "alice", &["read", "write"]);
+
+    client
+        .put(with_auth(
+            PutRequest {
+                tenant: "alice".into(),
+                key: Bytes::from_static(b"k"),
+                value: Bytes::from_static(b"v"),
+                ttl_ms: 0,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+
+    let g = client
+        .get(with_auth(
+            GetRequest {
+                tenant: "alice".into(),
+                key: Bytes::from_static(b"k"),
+            },
+            &token,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(g.found);
+}
+
+#[tokio::test]
+async fn auth_rejects_tenant_mismatch() {
+    let secret = b"hunter2";
+    let addr = spawn_secure_server(secret).await;
+    let mut client = connect(addr).await;
+    let alice_token = make_token(secret, "alice", &["read", "write"]);
+
+    let err = client
+        .put(with_auth(
+            PutRequest {
+                tenant: "bob".into(),
+                key: Bytes::from_static(b"k"),
+                value: Bytes::from_static(b"v"),
+                ttl_ms: 0,
+            },
+            &alice_token,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn auth_rejects_insufficient_permission() {
+    let secret = b"hunter2";
+    let addr = spawn_secure_server(secret).await;
+    let mut client = connect(addr).await;
+    let read_only = make_token(secret, "alice", &["read"]);
+
+    let err = client
+        .put(with_auth(
+            PutRequest {
+                tenant: "alice".into(),
+                key: Bytes::from_static(b"k"),
+                value: Bytes::from_static(b"v"),
+                ttl_ms: 0,
+            },
+            &read_only,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn auth_admin_perm_grants_everything() {
+    let secret = b"hunter2";
+    let addr = spawn_secure_server(secret).await;
+    let mut client = connect(addr).await;
+    let admin = make_token(secret, "alice", &["admin"]);
+
+    client
+        .put(with_auth(
+            PutRequest {
+                tenant: "alice".into(),
+                key: Bytes::from_static(b"k"),
+                value: Bytes::from_static(b"v"),
+                ttl_ms: 0,
+            },
+            &admin,
+        ))
+        .await
+        .unwrap();
+
+    client
+        .delete(with_auth(
+            DeleteRequest {
+                tenant: "alice".into(),
+                key: Bytes::from_static(b"k"),
+            },
+            &admin,
+        ))
+        .await
+        .unwrap();
 }

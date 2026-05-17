@@ -3,3 +3,10 @@ listen = "127.0.0.1:7100"
 data_dir = "./data/node"
 coord_endpoints = []
 backend = "fjall"
+shutdown_timeout_secs = 30
+
+[limits]
+max_key_size = 4096
+max_value_size = 10485760
+max_batch_ops = 1000
+max_scan_limit = 10000

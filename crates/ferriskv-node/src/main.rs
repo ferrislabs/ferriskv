@@ -2,13 +2,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use ferriskv_auth::JwtVerifier;
 use ferriskv_core::Limits;
-use ferriskv_node::{config::Backend, GrpcApi, NodeConfig, NodeService};
+use ferriskv_node::{
+    config::{AuthConfig, Backend},
+    AuthInterceptor, GrpcApi, NodeConfig, NodeService,
+};
 use ferriskv_proto::ferris_kv_server::FerrisKvServer;
 use tonic::transport::Server;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -44,6 +48,10 @@ async fn main() -> Result<()> {
             coord_endpoints: Vec::new(),
             backend: Backend::Memory,
             limits: Limits::default(),
+            auth: AuthConfig {
+                insecure: true,
+                ..Default::default()
+            },
             shutdown_timeout_secs: 30,
         }
     };
@@ -60,9 +68,10 @@ async fn main() -> Result<()> {
         "ferriskv-node starting",
     );
 
+    let interceptor = build_auth_interceptor(&service.config.auth)?;
     let api = GrpcApi::new(Arc::clone(&service));
     let serve = Server::builder()
-        .add_service(FerrisKvServer::new(api))
+        .add_service(FerrisKvServer::with_interceptor(api, interceptor))
         .serve_with_shutdown(addr, shutdown_signal());
 
     let outcome = tokio::time::timeout(shutdown_timeout + Duration::from_secs(5), serve).await;
@@ -80,6 +89,20 @@ async fn main() -> Result<()> {
 
     info!("shutdown complete");
     Ok(())
+}
+
+fn build_auth_interceptor(cfg: &AuthConfig) -> Result<AuthInterceptor> {
+    if cfg.insecure {
+        warn!("auth disabled (insecure=true); the server trusts every caller");
+        return Ok(AuthInterceptor::insecure());
+    }
+    let secret = cfg
+        .load_secret()
+        .map_err(anyhow::Error::msg)?
+        .ok_or_else(|| anyhow!("auth: jwt_secret or jwt_secret_path required when not insecure"))?;
+    let verifier = Arc::new(JwtVerifier::new_hs256(&secret));
+    info!("auth enabled (JWT HS256)");
+    Ok(AuthInterceptor::with_verifier(verifier))
 }
 
 async fn shutdown_signal() {
