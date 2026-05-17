@@ -9,10 +9,21 @@ use crate::{AuthError, Result};
 pub struct Claims {
     pub sub: Arc<str>,
     pub tenant: Arc<str>,
+    #[serde(default)]
     pub roles: Vec<Arc<str>>,
+    #[serde(default)]
+    pub perms: Vec<Arc<str>>,
     pub exp: u64,
     #[serde(default)]
     pub iss: Option<Arc<str>>,
+}
+
+impl Claims {
+    pub fn allows(&self, perm: &str) -> bool {
+        self.perms
+            .iter()
+            .any(|p| p.as_ref() == "admin" || p.as_ref() == perm)
+    }
 }
 
 pub struct JwtVerifier {
@@ -64,6 +75,7 @@ mod tests {
             sub: Arc::<str>::from("user-1"),
             tenant: Arc::<str>::from("alice"),
             roles: vec![Arc::<str>::from("read")],
+            perms: vec![Arc::<str>::from("read")],
             exp: now() + 3600,
             iss: None,
         };
@@ -87,6 +99,7 @@ mod tests {
             sub: Arc::<str>::from("user-1"),
             tenant: Arc::<str>::from("alice"),
             roles: Vec::new(),
+            perms: Vec::new(),
             exp: now() - 3600,
             iss: None,
         };
@@ -107,6 +120,7 @@ mod tests {
             sub: Arc::<str>::from("user-1"),
             tenant: Arc::<str>::from("alice"),
             roles: Vec::new(),
+            perms: Vec::new(),
             exp: now() + 3600,
             iss: None,
         };

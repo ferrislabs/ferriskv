@@ -99,6 +99,10 @@ mod tests {
             coord_endpoints: Vec::new(),
             backend,
             limits: ferriskv_core::Limits::default(),
+            auth: crate::config::AuthConfig {
+                insecure: true,
+                ..Default::default()
+            },
             shutdown_timeout_secs: 5,
         }
     }

@@ -675,6 +675,7 @@ dependencies = [
  "ferriskv-core",
  "ferriskv-proto",
  "futures",
+ "jsonwebtoken",
  "lz4_flex",
  "parking_lot",
  "serde",

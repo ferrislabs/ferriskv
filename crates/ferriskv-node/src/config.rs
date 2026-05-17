@@ -5,6 +5,36 @@ use std::sync::Arc;
 use ferriskv_core::Limits;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub insecure: bool,
+    pub public_key_path: Option<PathBuf>,
+}
+
+impl AuthConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.insecure {
+            return Ok(());
+        }
+        if self.public_key_path.is_none() {
+            return Err("auth: set insecure=true or provide public_key_path".into());
+        }
+        Ok(())
+    }
+
+    pub fn load_public_key(&self) -> Result<Option<Vec<u8>>, String> {
+        match &self.public_key_path {
+            Some(path) => {
+                let bytes = std::fs::read(path)
+                    .map_err(|e| format!("read public_key_path {}: {e}", path.display()))?;
+                Ok(Some(bytes))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub node_id: Arc<str>,
@@ -15,6 +45,8 @@ pub struct NodeConfig {
     pub backend: Backend,
     #[serde(default)]
     pub limits: Limits,
+    #[serde(default)]
+    pub auth: AuthConfig,
     #[serde(default = "default_shutdown_secs")]
     pub shutdown_timeout_secs: u64,
 }
@@ -43,6 +75,7 @@ impl NodeConfig {
             return Err("node_id exceeds 255 bytes".into());
         }
         self.limits.validate()?;
+        self.auth.validate()?;
         if self.shutdown_timeout_secs == 0 {
             return Err("shutdown_timeout_secs must be > 0".into());
         }
@@ -80,6 +113,10 @@ mod tests {
             coord_endpoints: Vec::new(),
             backend: Backend::Memory,
             limits: Limits::default(),
+            auth: AuthConfig {
+                insecure: true,
+                ..Default::default()
+            },
             shutdown_timeout_secs: 30,
         }
     }
@@ -98,6 +135,24 @@ mod tests {
         assert_eq!(cfg.backend, Backend::Fjall);
         assert_eq!(cfg.limits.max_value_size, 10 * 1024 * 1024);
         assert_eq!(cfg.shutdown_timeout_secs, 30);
+        assert!(!cfg.auth.insecure);
+    }
+
+    #[test]
+    fn auth_validate_rejects_missing_secret_when_not_insecure() {
+        let mut c = base_cfg();
+        c.auth = AuthConfig::default();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn auth_validate_accepts_public_key_path() {
+        let mut c = base_cfg();
+        c.auth = AuthConfig {
+            insecure: false,
+            public_key_path: Some(PathBuf::from("/etc/ferriskv/idp.pub")),
+        };
+        assert!(c.validate().is_ok());
     }
 
     #[test]
