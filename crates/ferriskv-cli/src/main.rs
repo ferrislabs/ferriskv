@@ -56,8 +56,8 @@ async fn build_channel(args: &Args) -> Result<Channel> {
     if args.endpoint.starts_with("https://") {
         let mut tls = ClientTlsConfig::new().with_native_roots();
         if let Some(path) = &args.tls_ca {
-            let pem = std::fs::read(path)
-                .with_context(|| format!("read tls-ca {}", path.display()))?;
+            let pem =
+                std::fs::read(path).with_context(|| format!("read tls-ca {}", path.display()))?;
             tls = tls.ca_certificate(Certificate::from_pem(pem));
         }
         if let Some(domain) = &args.tls_domain {
