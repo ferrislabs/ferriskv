@@ -1,5 +1,6 @@
 node_id = "node-0"
 listen = "127.0.0.1:7100"
+admin_listen = "127.0.0.1:7101"
 data_dir = "./data/node"
 coord_endpoints = []
 backend = "fjall"

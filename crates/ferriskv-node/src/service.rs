@@ -104,6 +104,7 @@ mod tests {
                 ..Default::default()
             },
             tls: None,
+            admin_listen: None,
             shutdown_timeout_secs: 5,
         }
     }

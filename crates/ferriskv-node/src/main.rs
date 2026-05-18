@@ -7,6 +7,7 @@ use clap::Parser;
 use ferriskv_auth::JwtVerifier;
 use ferriskv_core::Limits;
 use ferriskv_node::{
+    admin,
     config::{AuthConfig, Backend, TlsConfig},
     AuthInterceptor, GrpcApi, NodeConfig, NodeService,
 };
@@ -84,6 +85,7 @@ async fn main() -> Result<()> {
                 ..Default::default()
             },
             tls: None,
+            admin_listen: None,
             shutdown_timeout_secs: 10,
         }
     };
@@ -99,6 +101,26 @@ async fn main() -> Result<()> {
         backend = ?service.config.backend,
         "ferriskv-node starting",
     );
+
+    let admin_handle = if let Some(admin_addr) = service.config.admin_listen {
+        if !admin_addr.ip().is_loopback() {
+            warn!(
+                listen = %admin_addr,
+                "admin server listens on a non-loopback address, ensure network access is restricted",
+            );
+        } else {
+            info!(listen = %admin_addr, "admin server starting");
+        }
+        let admin_svc = Arc::clone(&service);
+        Some(tokio::spawn(async move {
+            if let Err(e) = admin::serve(admin_addr, admin_svc, shutdown_signal()).await {
+                error!(error = %e, "admin server error");
+            }
+        }))
+    } else {
+        info!("admin server disabled (set admin_listen to enable /healthz and /readyz)");
+        None
+    };
 
     let interceptor = build_auth_interceptor(&service.config.auth)?;
     let api = GrpcApi::new(Arc::clone(&service));
@@ -123,6 +145,12 @@ async fn main() -> Result<()> {
         Ok(Ok(())) => info!("server stopped accepting requests"),
         Ok(Err(e)) => error!(error = %e, "server error"),
         Err(_) => error!("shutdown exceeded timeout, forcing exit"),
+    }
+
+    if let Some(handle) = admin_handle {
+        if let Err(e) = handle.await {
+            error!(error = ?e, "admin server task ended unexpectedly");
+        }
     }
 
     if let Err(e) = service.wal.sync() {

@@ -81,6 +81,8 @@ pub struct NodeConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    #[serde(default)]
+    pub admin_listen: Option<SocketAddr>,
     #[serde(default = "default_shutdown_secs")]
     pub shutdown_timeout_secs: u64,
 }
@@ -155,6 +157,7 @@ mod tests {
                 ..Default::default()
             },
             tls: None,
+            admin_listen: None,
             shutdown_timeout_secs: 10,
         }
     }
@@ -275,6 +278,36 @@ mod tests {
         assert!(!c.is_empty());
         assert!(!k.is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parses_admin_listen() {
+        let cfg = parse(
+            r#"
+            node_id = "n0"
+            listen = "127.0.0.1:7100"
+            data_dir = "/tmp/ferriskv-node"
+            coord_endpoints = []
+            admin_listen = "127.0.0.1:7101"
+        "#,
+        );
+        assert_eq!(
+            cfg.admin_listen,
+            Some("127.0.0.1:7101".parse::<SocketAddr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn admin_listen_defaults_to_none() {
+        let cfg = parse(
+            r#"
+            node_id = "n0"
+            listen = "127.0.0.1:7100"
+            data_dir = "/tmp/ferriskv-node"
+            coord_endpoints = []
+        "#,
+        );
+        assert!(cfg.admin_listen.is_none());
     }
 
     #[test]
