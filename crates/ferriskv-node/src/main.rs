@@ -9,7 +9,7 @@ use ferriskv_core::Limits;
 use ferriskv_node::{
     admin,
     config::{AuthConfig, Backend, TlsConfig},
-    AuthInterceptor, GrpcApi, NodeConfig, NodeService,
+    ttl, AuthInterceptor, GrpcApi, NodeConfig, NodeService,
 };
 use ferriskv_proto::ferris_kv_server::FerrisKvServer;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
             },
             tls: None,
             admin_listen: None,
+            ttl_sweep_interval_secs: 60,
             shutdown_timeout_secs: 10,
         }
     };
@@ -104,6 +105,14 @@ async fn main() -> Result<()> {
         backend = ?service.config.backend,
         "ferriskv-node starting",
     );
+
+    let ttl_handle = {
+        let svc = Arc::clone(&service);
+        let interval = Duration::from_secs(service.config.ttl_sweep_interval_secs);
+        tokio::spawn(async move {
+            ttl::run_sweeper(svc, interval, shutdown_signal()).await;
+        })
+    };
 
     let admin_handle = if let Some(admin_addr) = service.config.admin_listen {
         if !admin_addr.ip().is_loopback() {
@@ -159,6 +168,10 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Err(e) = ttl_handle.await {
+        error!(error = ?e, "ttl sweeper task ended unexpectedly");
+    }
+
     if let Err(e) = service.wal.sync() {
         error!(error = %e, "WAL sync failed during shutdown");
     } else {
@@ -197,6 +210,18 @@ fn describe_metrics() {
     metrics::describe_counter!(
         "ferriskv_audit_events_total",
         "Total number of audit events emitted by the node"
+    );
+    metrics::describe_counter!(
+        "ferriskv_ttl_evicted_total",
+        "Total number of expired keys evicted by the TTL sweeper"
+    );
+    metrics::describe_histogram!(
+        "ferriskv_ttl_sweep_duration_seconds",
+        "Duration of a TTL sweeper pass, in seconds"
+    );
+    metrics::describe_gauge!(
+        "ferriskv_ttl_index_size",
+        "Number of keys currently scheduled in the in-memory TTL index"
     );
 }
 

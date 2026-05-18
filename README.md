@@ -122,6 +122,32 @@ Bind to `127.0.0.1` (the default convention) so the routes stay reachable only f
 
 Leaving `admin_listen` unset disables the admin server entirely.
 
+## TTL
+
+Two settings, one per request, one server-wide. They are independent.
+
+**Per-request, on the `put`:** `ttl_ms`. The lifetime of that specific key in milliseconds. `0` (the default) means the key never expires. Set it via the CLI flag `--ttl-ms` or directly in `PutRequest.ttl_ms` from a gRPC client. Stored values are framed with a one-byte version prefix; setting a TTL adds an 8-byte expiration timestamp on top.
+
+**Server-wide, in `node.toml`:** `ttl_sweep_interval_secs`. Maximum interval between two passes of the background TTL sweeper, in seconds. Default 60. Setting it to `0` disables the sweeper entirely, in which case expired values stay on disk but remain invisible to reads (a get on an expired key still returns "not found").
+
+```toml
+ttl_sweep_interval_secs = 60
+```
+
+Internally the node keeps an in-memory index of keys with a scheduled expiration. The sweeper wakes exactly when the next key is due, not on a fixed tick, so cleanup happens at the millisecond after expiration in the common case. The interval above is only an upper bound used as a fallback (so the loop still runs from time to time even when no key has a TTL). Expired keys disappear from reads immediately regardless of when the sweeper runs.
+
+Quick test:
+
+```sh
+# 5-second TTL
+./target/release/ferriskv --tenant alice put hello world --ttl-ms 5000
+./target/release/ferriskv --tenant alice get hello   # world
+sleep 6
+./target/release/ferriskv --tenant alice get hello   # exits 1
+```
+
+The GC currently does a full keyspace scan per pass, which is fine for the scale targeted in P0. An indexed scan keyed by expiration time is planned for later.
+
 ## TLS
 
 The server listens in plaintext by default. To enable TLS, add a `[tls]` section to `node.toml` pointing at a certificate and key in PEM format:
