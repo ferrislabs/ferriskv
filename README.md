@@ -106,6 +106,21 @@ Start the node.
 ./target/release/ferriskv-node --config config/node.toml
 ```
 
+## Health checks
+
+Set `admin_listen` in `node.toml` to start a secondary HTTP server with two routes:
+
+```toml
+admin_listen = "127.0.0.1:7101"
+```
+
+- `GET /healthz` returns `200 OK` while the process is alive.
+- `GET /readyz` returns `200 OK` when the storage engine answers a probe read, `503` otherwise.
+
+Bind to `127.0.0.1` (the default convention) so the routes stay reachable only from the same host: Kubernetes probes, sidecars and local agents have access, the outside network does not. If you genuinely need cross-host scraping, switch to `0.0.0.0` and pair it with a `NetworkPolicy` or firewall rule. The server logs a warning at startup when it binds outside loopback.
+
+Leaving `admin_listen` unset disables the admin server entirely.
+
 ## TLS
 
 The server listens in plaintext by default. To enable TLS, add a `[tls]` section to `node.toml` pointing at a certificate and key in PEM format:
