@@ -116,6 +116,7 @@ admin_listen = "127.0.0.1:7101"
 
 - `GET /healthz` returns `200 OK` while the process is alive.
 - `GET /readyz` returns `200 OK` when the storage engine answers a probe read, `503` otherwise.
+- `GET /metrics` returns Prometheus text format with RPC latencies and counters, value size histograms, and audit event counts.
 
 Bind to `127.0.0.1` (the default convention) so the routes stay reachable only from the same host: Kubernetes probes, sidecars and local agents have access, the outside network does not. If you genuinely need cross-host scraping, switch to `0.0.0.0` and pair it with a `NetworkPolicy` or firewall rule. The server logs a warning at startup when it binds outside loopback.
 

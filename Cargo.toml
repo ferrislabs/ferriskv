@@ -45,6 +45,8 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
 bloomfilter = "3"
 config = { version = "0.15", features = ["toml"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
