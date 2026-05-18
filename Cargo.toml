@@ -52,6 +52,7 @@ config = { version = "0.15", features = ["toml"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 futures = "0.3.32"
 parking_lot = "0.12.5"
+tempfile = "3"
 
 ferriskv-core = { path = "crates/ferriskv-core" }
 ferriskv-proto = { path = "crates/ferriskv-proto" }

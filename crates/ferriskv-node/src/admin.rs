@@ -113,7 +113,6 @@ where
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use axum::body::{to_bytes, Body};
@@ -121,30 +120,19 @@ mod tests {
     use ferriskv_core::Limits;
     use metrics_exporter_prometheus::PrometheusBuilder;
     use serde_json::Value;
+    use tempfile::TempDir;
     use tower::ServiceExt;
 
     use super::*;
     use crate::config::{AuthConfig, Backend};
     use crate::{NodeConfig, NodeService};
 
-    fn tmp_dir(tag: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "ferriskv-admin-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        p
-    }
-
-    fn test_service(tag: &str) -> Arc<NodeService> {
+    fn test_service() -> (Arc<NodeService>, TempDir) {
+        let dir = TempDir::new().unwrap();
         let cfg = NodeConfig {
             node_id: Arc::<str>::from("test-node"),
             listen: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
-            data_dir: tmp_dir(tag),
+            data_dir: dir.path().to_path_buf(),
             coord_endpoints: Vec::new(),
             backend: Backend::Memory,
             limits: Limits::default(),
@@ -156,7 +144,7 @@ mod tests {
             admin_listen: None,
             shutdown_timeout_secs: 5,
         };
-        Arc::new(NodeService::open(cfg).unwrap())
+        (Arc::new(NodeService::open(cfg).unwrap()), dir)
     }
 
     fn test_handle() -> PrometheusHandle {
@@ -175,7 +163,8 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_returns_ok_json() {
-        let app = router(test_service("healthz"), test_handle());
+        let (svc, _dir) = test_service();
+        let app = router(svc, test_handle());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -200,7 +189,8 @@ mod tests {
 
     #[tokio::test]
     async fn readyz_returns_ready_json_when_storage_responsive() {
-        let app = router(test_service("readyz"), test_handle());
+        let (svc, _dir) = test_service();
+        let app = router(svc, test_handle());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -219,7 +209,8 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_returns_prometheus_text_with_correct_content_type() {
-        let app = router(test_service("metrics"), test_handle());
+        let (svc, _dir) = test_service();
+        let app = router(svc, test_handle());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -244,7 +235,8 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_route_returns_404() {
-        let app = router(test_service("404"), test_handle());
+        let (svc, _dir) = test_service();
+        let app = router(svc, test_handle());
         let resp = app
             .oneshot(
                 Request::builder()

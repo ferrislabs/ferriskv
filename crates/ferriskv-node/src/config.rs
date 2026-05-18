@@ -256,17 +256,9 @@ mod tests {
 
     #[test]
     fn tls_validate_accepts_existing_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "ferriskv-tls-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cert = dir.join("server.crt");
-        let key = dir.join("server.key");
+        let dir = tempfile::TempDir::new().unwrap();
+        let cert = dir.path().join("server.crt");
+        let key = dir.path().join("server.key");
         std::fs::write(&cert, b"-----BEGIN CERTIFICATE-----\n").unwrap();
         std::fs::write(&key, b"-----BEGIN PRIVATE KEY-----\n").unwrap();
         let tls = TlsConfig {
@@ -277,7 +269,6 @@ mod tests {
         let (c, k) = tls.load().unwrap();
         assert!(!c.is_empty());
         assert!(!k.is_empty());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

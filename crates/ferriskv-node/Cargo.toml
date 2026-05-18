@@ -38,3 +38,4 @@ metrics-exporter-prometheus = { workspace = true }
 [dev-dependencies]
 jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }

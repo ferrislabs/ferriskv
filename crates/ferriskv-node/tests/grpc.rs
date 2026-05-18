@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +15,7 @@ use ferriskv_proto::{
     BatchOp, BatchRequest, DeleteRequest, GetRequest, PutRequest, ScanRequest, WatchRequest,
 };
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use tempfile::TempDir;
 use tonic::transport::Server;
 
 fn pick_port() -> SocketAddr {
@@ -23,21 +23,6 @@ fn pick_port() -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     drop(listener);
     addr
-}
-
-fn temp_dir() -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let id = format!(
-        "ferriskv-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    p.push(id);
-    std::fs::create_dir_all(&p).unwrap();
-    p
 }
 
 async fn spawn_server() -> SocketAddr {
@@ -55,10 +40,11 @@ async fn spawn_secure_server(secret: &[u8]) -> SocketAddr {
 
 async fn spawn_with(limits: Limits, interceptor: AuthInterceptor) -> SocketAddr {
     let addr = pick_port();
+    let dir = TempDir::new().unwrap();
     let cfg = NodeConfig {
         node_id: Arc::<str>::from("test-node"),
         listen: addr,
-        data_dir: temp_dir(),
+        data_dir: dir.path().to_path_buf(),
         coord_endpoints: Vec::new(),
         backend: Backend::Memory,
         limits,
@@ -73,6 +59,7 @@ async fn spawn_with(limits: Limits, interceptor: AuthInterceptor) -> SocketAddr 
     let service = Arc::new(NodeService::open(cfg).unwrap());
     let api = GrpcApi::new(service);
     tokio::spawn(async move {
+        let _keep_dir = dir;
         let _ = Server::builder()
             .add_service(FerrisKvServer::with_interceptor(api, interceptor))
             .serve(addr)
