@@ -66,6 +66,7 @@ async fn spawn_with(limits: Limits, interceptor: AuthInterceptor) -> SocketAddr 
             insecure: true,
             ..Default::default()
         },
+        tls: None,
         shutdown_timeout_secs: 5,
     };
     let service = Arc::new(NodeService::open(cfg).unwrap());

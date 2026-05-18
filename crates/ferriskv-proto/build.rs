@@ -13,10 +13,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let fds = protox::compile([proto_file], [proto_dir])?;
 
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .bytes(["."])
+        .bytes(".")
         .compile_fds(fds)?;
 
     Ok(())

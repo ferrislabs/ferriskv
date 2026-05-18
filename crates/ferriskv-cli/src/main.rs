@@ -1,9 +1,12 @@
-use anyhow::Result;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use ferriskv_proto::{
     ferris_kv_client::FerrisKvClient, DeleteRequest, GetRequest, PutRequest, ScanRequest,
 };
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -14,6 +17,14 @@ struct Args {
 
     #[arg(long, default_value = "default")]
     tenant: String,
+
+    /// Path to a PEM-encoded CA certificate, in addition to the system trust store.
+    #[arg(long, env = "FERRISKV_TLS_CA")]
+    tls_ca: Option<PathBuf>,
+
+    /// Override the SNI domain sent during the TLS handshake.
+    #[arg(long, env = "FERRISKV_TLS_DOMAIN")]
+    tls_domain: Option<String>,
 
     #[command(subcommand)]
     cmd: Command,
@@ -38,6 +49,26 @@ enum Command {
     },
 }
 
+async fn build_channel(args: &Args) -> Result<Channel> {
+    let mut endpoint =
+        Endpoint::from_shared(args.endpoint.clone()).context("invalid endpoint URL")?;
+
+    if args.endpoint.starts_with("https://") {
+        let mut tls = ClientTlsConfig::new().with_native_roots();
+        if let Some(path) = &args.tls_ca {
+            let pem =
+                std::fs::read(path).with_context(|| format!("read tls-ca {}", path.display()))?;
+            tls = tls.ca_certificate(Certificate::from_pem(pem));
+        }
+        if let Some(domain) = &args.tls_domain {
+            tls = tls.domain_name(domain.clone());
+        }
+        endpoint = endpoint.tls_config(tls).context("configure TLS")?;
+    }
+
+    endpoint.connect().await.context("connect to endpoint")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -47,7 +78,8 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let mut client = FerrisKvClient::connect(args.endpoint.clone()).await?;
+    let channel = build_channel(&args).await?;
+    let mut client = FerrisKvClient::new(channel);
 
     match args.cmd {
         Command::Get { key } => {
