@@ -110,35 +110,23 @@ fn read_last_seq(path: &Path) -> Result<Option<u64>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use tempfile::TempDir;
 
-    fn tmp_path() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "ferriskv-wal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        p
-    }
+    use super::*;
 
     #[test]
     fn append_returns_monotonic_seq() {
-        let path = tmp_path();
-        let wal = Wal::open(&path).unwrap();
+        let dir = TempDir::new().unwrap();
+        let wal = Wal::open(dir.path().join("wal.log")).unwrap();
         assert_eq!(wal.append(1, b"k1", b"v1").unwrap(), 0);
         assert_eq!(wal.append(1, b"k2", b"v2").unwrap(), 1);
         assert_eq!(wal.append(2, b"k1", b"").unwrap(), 2);
-        std::fs::remove_dir_all(path.parent().unwrap_or(&path)).ok();
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn reopen_recovers_next_seq() {
-        let path = tmp_path();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("wal.log");
         {
             let wal = Wal::open(&path).unwrap();
             wal.append(1, b"a", b"v").unwrap();
@@ -147,6 +135,5 @@ mod tests {
         }
         let wal = Wal::open(&path).unwrap();
         assert_eq!(wal.append(1, b"c", b"v").unwrap(), 2);
-        std::fs::remove_file(&path).ok();
     }
 }

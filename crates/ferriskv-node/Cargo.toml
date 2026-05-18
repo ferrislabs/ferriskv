@@ -32,7 +32,10 @@ crc32fast = { workspace = true }
 lz4_flex = { workspace = true }
 bloomfilter = { workspace = true }
 futures = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 [dev-dependencies]
 jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }

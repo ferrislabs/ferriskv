@@ -17,3 +17,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 bloomfilter = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

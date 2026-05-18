@@ -12,6 +12,7 @@ use ferriskv_node::{
     AuthInterceptor, GrpcApi, NodeConfig, NodeService,
 };
 use ferriskv_proto::ferris_kv_server::FerrisKvServer;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -92,6 +93,8 @@ async fn main() -> Result<()> {
 
     cfg.validate().map_err(anyhow::Error::msg)?;
 
+    let metrics_handle = install_metrics_recorder()?;
+
     let service = Arc::new(NodeService::open(cfg)?);
     let addr = service.config.listen;
     let shutdown_timeout = Duration::from_secs(service.config.shutdown_timeout_secs);
@@ -112,8 +115,11 @@ async fn main() -> Result<()> {
             info!(listen = %admin_addr, "admin server starting");
         }
         let admin_svc = Arc::clone(&service);
+        let admin_metrics = metrics_handle.clone();
         Some(tokio::spawn(async move {
-            if let Err(e) = admin::serve(admin_addr, admin_svc, shutdown_signal()).await {
+            if let Err(e) =
+                admin::serve(admin_addr, admin_svc, admin_metrics, shutdown_signal()).await
+            {
                 error!(error = %e, "admin server error");
             }
         }))
@@ -161,6 +167,37 @@ async fn main() -> Result<()> {
 
     info!("shutdown complete");
     Ok(())
+}
+
+fn install_metrics_recorder() -> Result<PrometheusHandle> {
+    let handle = PrometheusBuilder::new()
+        .install_recorder()
+        .map_err(|e| anyhow!("install global metrics recorder: {e}"))?;
+    describe_metrics();
+    Ok(handle)
+}
+
+fn describe_metrics() {
+    metrics::describe_counter!(
+        "ferriskv_rpc_requests_total",
+        "Total number of gRPC requests received by the node"
+    );
+    metrics::describe_histogram!(
+        "ferriskv_rpc_duration_seconds",
+        "gRPC request latency in seconds"
+    );
+    metrics::describe_histogram!(
+        "ferriskv_value_bytes",
+        "Distribution of value sizes processed by the node, in bytes"
+    );
+    metrics::describe_histogram!(
+        "ferriskv_scan_entries",
+        "Number of entries returned per Scan call"
+    );
+    metrics::describe_counter!(
+        "ferriskv_audit_events_total",
+        "Total number of audit events emitted by the node"
+    );
 }
 
 fn build_tls(cfg: &TlsConfig) -> Result<ServerTlsConfig> {

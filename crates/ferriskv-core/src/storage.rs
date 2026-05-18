@@ -229,23 +229,10 @@ mod tests {
         ));
     }
 
-    fn tmp_fjall_path() -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "ferriskv-fjall-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        p
-    }
-
     #[test]
     fn fjall_roundtrip_and_scan_range() {
-        let path = tmp_fjall_path();
-        let s = FjallStorage::open(&path, "test").unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let s = FjallStorage::open(dir.path(), "test").unwrap();
         for k in [b"aa", b"ab", b"ba", b"bb"] {
             s.put(k, Bytes::from_static(b"v")).unwrap();
         }
@@ -265,8 +252,5 @@ mod tests {
 
         s.delete(b"aa").unwrap();
         assert!(s.get(b"aa").unwrap().is_none());
-
-        drop(s);
-        std::fs::remove_dir_all(&path).ok();
     }
 }

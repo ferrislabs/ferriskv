@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use ferriskv_core::{Error, KeyCodec, Storage, Subspace};
@@ -167,9 +168,35 @@ fn next_prefix_bound(prefix: &[u8]) -> Bytes {
     Bytes::new()
 }
 
-#[tonic::async_trait]
-impl FerrisKv for GrpcApi {
-    async fn get(&self, req: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
+#[inline]
+fn record_rpc<T>(rpc: &'static str, tenant: &str, start: Instant, result: &Result<T, Status>) {
+    let code = result
+        .as_ref()
+        .err()
+        .map(|s| s.code())
+        .unwrap_or(tonic::Code::Ok);
+    let code_label = format!("{code:?}");
+    let tenant_label = tenant.to_string();
+
+    metrics::counter!(
+        "ferriskv_rpc_requests_total",
+        "rpc" => rpc,
+        "tenant" => tenant_label.clone(),
+        "code" => code_label.clone(),
+    )
+    .increment(1);
+
+    metrics::histogram!(
+        "ferriskv_rpc_duration_seconds",
+        "rpc" => rpc,
+        "tenant" => tenant_label,
+        "code" => code_label,
+    )
+    .record(start.elapsed().as_secs_f64());
+}
+
+impl GrpcApi {
+    async fn get_impl(&self, req: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_READ)?;
         let r = req.into_inner();
@@ -177,11 +204,14 @@ impl FerrisKv for GrpcApi {
         let k = encode_data_key(&r.tenant, &r.key)?;
         let value = self.inner.get(&k).map_err(to_status)?;
         Ok(Response::new(match value {
-            Some(v) => GetResponse {
-                found: true,
-                value: v,
-                version: 0,
-            },
+            Some(v) => {
+                metrics::histogram!("ferriskv_value_bytes", "op" => "get").record(v.len() as f64);
+                GetResponse {
+                    found: true,
+                    value: v,
+                    version: 0,
+                }
+            }
             None => GetResponse {
                 found: false,
                 value: Default::default(),
@@ -190,7 +220,7 @@ impl FerrisKv for GrpcApi {
         }))
     }
 
-    async fn put(&self, req: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
+    async fn put_impl(&self, req: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_WRITE)?;
         let principal = req
@@ -202,13 +232,14 @@ impl FerrisKv for GrpcApi {
         self.enforce_key_size(&r.key)?;
         self.enforce_value_size(&r.value)?;
         let value_size = r.value.len();
+        metrics::histogram!("ferriskv_value_bytes", "op" => "put").record(value_size as f64);
         let k = encode_data_key(&r.tenant, &r.key)?;
         self.inner.put(&k, r.value).map_err(to_status)?;
         audit::write(&principal, &r.tenant, "put", &r.key, value_size);
         Ok(Response::new(PutResponse { version: 0 }))
     }
 
-    async fn delete(
+    async fn delete_impl(
         &self,
         req: Request<DeleteRequest>,
     ) -> Result<Response<DeleteResponse>, Status> {
@@ -228,9 +259,10 @@ impl FerrisKv for GrpcApi {
         Ok(Response::new(DeleteResponse { found }))
     }
 
-    type ScanStream = Iter<std::vec::IntoIter<Result<ScanChunk, Status>>>;
-
-    async fn scan(&self, req: Request<ScanRequest>) -> Result<Response<Self::ScanStream>, Status> {
+    async fn scan_impl(
+        &self,
+        req: Request<ScanRequest>,
+    ) -> Result<Response<<Self as FerrisKv>::ScanStream>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_READ)?;
         let r = req.into_inner();
@@ -245,12 +277,14 @@ impl FerrisKv for GrpcApi {
 
         let mut chunks: Vec<Result<ScanChunk, Status>> = Vec::new();
         let mut current: Vec<KeyValue> = Vec::with_capacity(SCAN_CHUNK_SIZE);
+        let mut total_entries: u64 = 0;
         for (k, v) in iter.take(limit) {
             let user_key = k.slice(bounds.strip_len..);
             current.push(KeyValue {
                 key: user_key,
                 value: v,
             });
+            total_entries += 1;
             if current.len() >= SCAN_CHUNK_SIZE {
                 chunks.push(Ok(ScanChunk {
                     entries: std::mem::take(&mut current),
@@ -260,21 +294,23 @@ impl FerrisKv for GrpcApi {
         if !current.is_empty() {
             chunks.push(Ok(ScanChunk { entries: current }));
         }
+        metrics::histogram!("ferriskv_scan_entries").record(total_entries as f64);
         Ok(Response::new(futures::stream::iter(chunks)))
     }
 
-    type WatchStream = Iter<std::vec::IntoIter<Result<WatchEvent, Status>>>;
-
-    async fn watch(
+    async fn watch_impl(
         &self,
         req: Request<WatchRequest>,
-    ) -> Result<Response<Self::WatchStream>, Status> {
+    ) -> Result<Response<<Self as FerrisKv>::WatchStream>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_WATCH)?;
         Err(Status::unimplemented("watch not implemented yet"))
     }
 
-    async fn batch(&self, req: Request<BatchRequest>) -> Result<Response<BatchResponse>, Status> {
+    async fn batch_impl(
+        &self,
+        req: Request<BatchRequest>,
+    ) -> Result<Response<BatchResponse>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         let needs_write = req.get_ref().ops.iter().any(|o| o.op == OP_PUT);
         let needs_delete = req.get_ref().ops.iter().any(|o| o.op == OP_DELETE);
@@ -301,6 +337,8 @@ impl FerrisKv for GrpcApi {
             let k = encode_data_key(&r.tenant, &op.key)?;
             let op_name = match op.op {
                 OP_PUT => {
+                    metrics::histogram!("ferriskv_value_bytes", "op" => "put")
+                        .record(value_size as f64);
                     self.inner.put(&k, op.value).map_err(to_status)?;
                     "put"
                 }
@@ -313,5 +351,66 @@ impl FerrisKv for GrpcApi {
             audit::write(&principal, &r.tenant, op_name, &op.key, value_size);
         }
         Ok(Response::new(BatchResponse { ok: true }))
+    }
+}
+
+#[tonic::async_trait]
+impl FerrisKv for GrpcApi {
+    async fn get(&self, req: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
+        let start = Instant::now();
+        let tenant = req.get_ref().tenant.clone();
+        let result = self.get_impl(req).await;
+        record_rpc("get", &tenant, start, &result);
+        result
+    }
+
+    async fn put(&self, req: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
+        let start = Instant::now();
+        let tenant = req.get_ref().tenant.clone();
+        let result = self.put_impl(req).await;
+        record_rpc("put", &tenant, start, &result);
+        result
+    }
+
+    async fn delete(
+        &self,
+        req: Request<DeleteRequest>,
+    ) -> Result<Response<DeleteResponse>, Status> {
+        let start = Instant::now();
+        let tenant = req.get_ref().tenant.clone();
+        let result = self.delete_impl(req).await;
+        record_rpc("delete", &tenant, start, &result);
+        result
+    }
+
+    type ScanStream = Iter<std::vec::IntoIter<Result<ScanChunk, Status>>>;
+
+    async fn scan(&self, req: Request<ScanRequest>) -> Result<Response<Self::ScanStream>, Status> {
+        let start = Instant::now();
+        let tenant = req.get_ref().tenant.clone();
+        let result = self.scan_impl(req).await;
+        record_rpc("scan", &tenant, start, &result);
+        result
+    }
+
+    type WatchStream = Iter<std::vec::IntoIter<Result<WatchEvent, Status>>>;
+
+    async fn watch(
+        &self,
+        req: Request<WatchRequest>,
+    ) -> Result<Response<Self::WatchStream>, Status> {
+        let start = Instant::now();
+        let tenant = req.get_ref().tenant.clone();
+        let result = self.watch_impl(req).await;
+        record_rpc("watch", &tenant, start, &result);
+        result
+    }
+
+    async fn batch(&self, req: Request<BatchRequest>) -> Result<Response<BatchResponse>, Status> {
+        let start = Instant::now();
+        let tenant = req.get_ref().tenant.clone();
+        let result = self.batch_impl(req).await;
+        record_rpc("batch", &tenant, start, &result);
+        result
     }
 }

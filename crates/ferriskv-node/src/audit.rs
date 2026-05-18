@@ -14,6 +14,12 @@ pub fn write(principal: &Principal, tenant: &str, op: &str, key: &[u8], value_si
         value_size = value_size,
         "audit",
     );
+    metrics::counter!(
+        "ferriskv_audit_events_total",
+        "op" => op.to_string(),
+        "tenant" => tenant.to_string(),
+    )
+    .increment(1);
 }
 
 fn principal_label(p: &Principal) -> &str {
