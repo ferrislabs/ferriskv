@@ -1,0 +1,58 @@
+[Unit]
+Description=FerrisKV storage node
+Documentation=https://github.com/ferrislabs/ferriskv
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ferriskv
+Group=ferriskv
+
+ExecStart=/usr/local/bin/ferriskv-node --config /etc/ferriskv/node.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+
+Environment=RUST_LOG=info
+
+# Directories managed by systemd. StateDirectory creates /var/lib/ferriskv
+# owned by the service user; point data_dir there in node.toml.
+StateDirectory=ferriskv
+StateDirectoryMode=0750
+ConfigurationDirectory=ferriskv
+ConfigurationDirectoryMode=0750
+LogsDirectory=ferriskv
+LogsDirectoryMode=0750
+
+# Sandboxing. Tightens the blast radius if the process is compromised.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete
+
+# Resource limits.
+LimitNOFILE=65536
+LimitNPROC=4096
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

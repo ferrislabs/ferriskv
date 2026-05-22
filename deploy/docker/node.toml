@@ -1,0 +1,19 @@
+# Sample config for the docker-compose stack. Insecure auth, no TLS — for
+# local testing only. Do not use as-is in production.
+node_id = "node-0"
+listen = "0.0.0.0:7100"
+admin_listen = "0.0.0.0:7101"
+data_dir = "/var/lib/ferriskv"
+coord_endpoints = []
+backend = "fjall"
+ttl_sweep_interval_secs = 60
+shutdown_timeout_secs = 3600
+
+[auth]
+insecure = true
+
+[limits]
+max_key_size = 4096
+max_value_size = 10485760
+max_batch_ops = 1000
+max_scan_limit = 10000

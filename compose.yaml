@@ -1,0 +1,44 @@
+# Local-only test stack. Insecure auth, no TLS — see deploy/docker/node.toml.
+#
+#   docker compose up -d node
+#   docker compose run --rm cli --endpoint http://node:7100 --tenant alice put hello world
+#   docker compose run --rm cli --endpoint http://node:7100 --tenant alice get hello
+#   curl http://localhost:7101/healthz
+
+name: ferriskv
+
+services:
+  node:
+    build:
+      context: .
+      target: node
+    image: ferriskv-node:latest
+    container_name: ferriskv-node
+    ports:
+      - "7100:7100"
+      - "7101:7101"
+    volumes:
+      - data:/var/lib/ferriskv
+      - ./deploy/docker/node.toml:/etc/ferriskv/node.toml:ro
+    environment:
+      RUST_LOG: info
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7101/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  cli:
+    build:
+      context: .
+      target: cli
+    image: ferriskv-cli:latest
+    profiles: ["tools"]
+    depends_on:
+      node:
+        condition: service_healthy
+
+volumes:
+  data:
