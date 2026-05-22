@@ -32,3 +32,20 @@
 
 # Logs
 *.log
+
+# Website (Turborepo / Astro monorepo under ./website)
+website/**/node_modules/
+website/**/.turbo/
+website/**/.astro/
+website/**/dist/
+website/**/build/
+website/**/.cache/
+website/**/coverage/
+website/**/*.tsbuildinfo
+website/**/.env
+website/**/.env.*
+!website/**/.env.example
+website/**/npm-debug.log*
+website/**/yarn-debug.log*
+website/**/yarn-error.log*
+website/**/pnpm-debug.log*
