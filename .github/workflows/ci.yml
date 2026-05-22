@@ -83,6 +83,8 @@ jobs:
         with:
           files: lcov.info
           fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   test-heavy:
     if: contains(github.event.pull_request.labels.*.name, 'heavy-tests')
