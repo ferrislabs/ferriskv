@@ -15,3 +15,10 @@ thiserror = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 blake3 = { workspace = true }
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "auth"
+harness = false

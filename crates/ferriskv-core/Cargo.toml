@@ -20,3 +20,12 @@ bloomfilter = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+divan = { workspace = true }
+
+[[bench]]
+name = "codec"
+harness = false
+
+[[bench]]
+name = "mem_storage"
+harness = false
