@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/ferrislabs/ferriskv/actions/workflows/ci.yml/badge.svg)](https://github.com/ferrislabs/ferriskv/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/ferrislabs/ferriskv/branch/main/graph/badge.svg)](https://codecov.io/gh/ferrislabs/ferriskv)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/ferrislabs/ferriskv)
 [![License](https://img.shields.io/github/license/ferrislabs/ferriskv)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![Issues](https://img.shields.io/github/issues/ferrislabs/ferriskv)](https://github.com/ferrislabs/ferriskv/issues)
