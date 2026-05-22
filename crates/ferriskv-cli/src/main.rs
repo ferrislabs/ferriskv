@@ -38,6 +38,9 @@ enum Command {
     Put {
         key: String,
         value: String,
+        /// Time-to-live in milliseconds. 0 (default) means the value never expires.
+        #[arg(long, default_value_t = 0)]
+        ttl_ms: u64,
     },
     Delete {
         key: String,
@@ -96,13 +99,13 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Command::Put { key, value } => {
+        Command::Put { key, value, ttl_ms } => {
             let resp = client
                 .put(PutRequest {
                     tenant: args.tenant,
                     key: Bytes::from(key.into_bytes()),
                     value: Bytes::from(value.into_bytes()),
-                    ttl_ms: 0,
+                    ttl_ms,
                 })
                 .await?
                 .into_inner();

@@ -142,6 +142,7 @@ mod tests {
             },
             tls: None,
             admin_listen: None,
+            ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 5,
         };
         (Arc::new(NodeService::open(cfg).unwrap()), dir)

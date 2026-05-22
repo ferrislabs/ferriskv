@@ -54,6 +54,7 @@ async fn spawn_with(limits: Limits, interceptor: AuthInterceptor) -> SocketAddr 
         },
         tls: None,
         admin_listen: None,
+        ttl_sweep_interval_secs: 0,
         shutdown_timeout_secs: 5,
     };
     let service = Arc::new(NodeService::open(cfg).unwrap());
@@ -587,4 +588,42 @@ async fn auth_admin_perm_grants_everything() {
         ))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn ttl_expired_key_returns_not_found() {
+    let addr = spawn_server().await;
+    let mut client = connect(addr).await;
+
+    client
+        .put(PutRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"ephemeral"),
+            value: Bytes::from_static(b"v"),
+            ttl_ms: 100,
+        })
+        .await
+        .unwrap();
+
+    let immediate = client
+        .get(GetRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"ephemeral"),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(immediate.found);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let after = client
+        .get(GetRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"ephemeral"),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!after.found);
 }

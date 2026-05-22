@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use ferriskv_core::{Error, KeyCodec, Storage, Subspace};
+use ferriskv_core::{Error, KeyCodec, Subspace};
 use ferriskv_proto::ferris_kv_server::FerrisKv;
 use ferriskv_proto::{
     BatchRequest, BatchResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse, KeyValue,
@@ -234,7 +234,9 @@ impl GrpcApi {
         let value_size = r.value.len();
         metrics::histogram!("ferriskv_value_bytes", "op" => "put").record(value_size as f64);
         let k = encode_data_key(&r.tenant, &r.key)?;
-        self.inner.put(&k, r.value).map_err(to_status)?;
+        self.inner
+            .put_with_ttl(&k, &r.value, r.ttl_ms)
+            .map_err(to_status)?;
         audit::write(&principal, &r.tenant, "put", &r.key, value_size);
         Ok(Response::new(PutResponse { version: 0 }))
     }
@@ -339,7 +341,9 @@ impl GrpcApi {
                 OP_PUT => {
                     metrics::histogram!("ferriskv_value_bytes", "op" => "put")
                         .record(value_size as f64);
-                    self.inner.put(&k, op.value).map_err(to_status)?;
+                    self.inner
+                        .put_with_ttl(&k, &op.value, 0)
+                        .map_err(to_status)?;
                     "put"
                 }
                 OP_DELETE => {

@@ -83,6 +83,8 @@ pub struct NodeConfig {
     pub tls: Option<TlsConfig>,
     #[serde(default)]
     pub admin_listen: Option<SocketAddr>,
+    #[serde(default = "default_ttl_sweep_interval_secs")]
+    pub ttl_sweep_interval_secs: u64,
     #[serde(default = "default_shutdown_secs")]
     pub shutdown_timeout_secs: u64,
 }
@@ -100,6 +102,10 @@ fn default_backend() -> Backend {
 
 fn default_shutdown_secs() -> u64 {
     10
+}
+
+fn default_ttl_sweep_interval_secs() -> u64 {
+    60
 }
 
 impl NodeConfig {
@@ -158,6 +164,7 @@ mod tests {
             },
             tls: None,
             admin_listen: None,
+            ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 10,
         }
     }

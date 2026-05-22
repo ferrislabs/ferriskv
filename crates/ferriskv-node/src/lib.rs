@@ -4,6 +4,7 @@ pub mod auth_layer;
 pub mod config;
 pub mod grpc;
 pub mod service;
+pub mod ttl;
 pub mod wal;
 
 pub use auth_layer::{AuthInterceptor, Principal};
