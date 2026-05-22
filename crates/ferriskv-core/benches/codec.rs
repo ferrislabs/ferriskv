@@ -58,5 +58,7 @@ fn value_decode_with_ttl(bencher: Bencher, size: usize) {
 #[divan::bench]
 fn value_is_expired_hot(bencher: Bencher) {
     let encoded = ValueCodec::encode(b"value", Some(1_700_000_000_000));
-    bencher.bench(|| ValueCodec::is_expired(black_box(&encoded), black_box(1_600_000_000_000)).unwrap());
+    bencher.bench(|| {
+        ValueCodec::is_expired(black_box(&encoded), black_box(1_600_000_000_000)).unwrap()
+    });
 }
