@@ -72,11 +72,11 @@ Lexicographic order is preserved, so a tenant's data is one contiguous range and
 
 ## Current capabilities
 
-The server handles gRPC `get`, `put`, `delete`, streamed `scan`, and `batch`. Tenant isolation is enforced at the keyspace level. Two storage backends are configurable: an in-memory `DashMap` for development, or `fjall` for persistence. The write-ahead log on disk recovers its sequence counter at boot. Configurable limits on key size, value size, batch size, and scan cap. Shutdown handles SIGINT and SIGTERM, drains in-flight requests, and flushes the WAL before exiting. The workspace currently has 51 tests covering the codec, the storage backends, the placement structure, the gRPC handlers, and the auth primitives.
+The server handles gRPC `get`, `put`, `delete`, streamed `scan`, and `batch`. Tenant isolation is enforced at the keyspace level. Two storage backends are configurable: an in-memory `DashMap` for development, or `fjall` for persistence. The write-ahead log on disk recovers its sequence counter at boot. Configurable limits on key size, value size, batch size, and scan cap. Per-request TTL is enforced by an index-driven background sweeper. JWT authentication and per-RPC RBAC are enforced on every call. TLS is supported with configurable cert and key paths. A structured audit log records writes. An admin HTTP server exposes `/healthz`, `/readyz`, and Prometheus `/metrics`. Shutdown handles SIGINT and SIGTERM, drains in-flight requests, and flushes the WAL before exiting. The workspace currently has 105 tests covering the codec, the storage backends, the placement structure, the gRPC handlers, the TTL sweeper, and the auth primitives.
 
 ## What is not done yet
 
-No authentication is enforced. The auth crate carries JWT and RBAC primitives, but nothing plugs them into the gRPC stack, so the server trusts whoever connects. No TLS either. The `ttl_ms` field of `PutRequest` is accepted and silently ignored. No replication, so losing the single node loses data. No multi-key transactions, no MVCC, no snapshot reads. The `Watch` RPC returns `Unimplemented`.
+No replication, so losing the single node loses data. No multi-key transactions, no MVCC, no snapshot reads. The `Watch` RPC returns `Unimplemented`. No range sharding or rebalancing across nodes. No client libraries outside Rust, no SQL surface, no Kubernetes operator or Helm chart. No automated backups to object storage.
 
 All of it is tracked as [issues](https://github.com/ferrislabs/ferriskv/issues), grouped under the [milestones](https://github.com/ferrislabs/ferriskv/milestones).
 
