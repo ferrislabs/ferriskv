@@ -36,6 +36,16 @@ mkdir -p fuzz/corpus/wal_frame
 cargo +nightly fuzz run wal_frame fuzz/corpus/wal_frame fuzz/seeds/wal_frame
 ```
 
+On a host whose default target links libc statically — musl, as some CI images
+report — AddressSanitizer cannot be linked at all and the build fails before a
+single input is tried. Pass the gnu triple explicitly:
+
+```sh
+cargo +nightly fuzz run wal_frame --target x86_64-unknown-linux-gnu ...
+```
+
+The CI workflow pins it for exactly this reason.
+
 ## Corpus layout
 
 `seeds/<target>/` is committed and read-only. `corpus/<target>/` is where
