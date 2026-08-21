@@ -80,6 +80,12 @@ impl KeyCodec {
             return Err(Error::Corrupt("empty key"));
         }
         let tlen = key[0] as usize;
+        // `encode` rejects an empty tenant, so a zero length here did not come
+        // from this codec. Symmetry matters: whatever `decode` accepts, callers
+        // will treat as a real tenant name.
+        if tlen == 0 {
+            return Err(Error::Corrupt("empty tenant"));
+        }
         if 1 + tlen + 1 > key.len() {
             return Err(Error::Corrupt("truncated key"));
         }
@@ -132,6 +138,16 @@ mod tests {
     #[test]
     fn empty_tenant_rejected() {
         assert!(KeyCodec::encode("", Subspace::Data, b"x").is_err());
+    }
+
+    #[test]
+    fn decode_rejects_what_encode_can_never_produce() {
+        // `encode` refuses an empty tenant, so a leading length of zero cannot
+        // come from this codec. Accepting it on the way back in would let a
+        // corrupt key decode into a tenant nobody can own, and every caller
+        // downstream would treat that empty string as a legitimate tenant.
+        let forged = [0u8, Subspace::Data as u8, b'p', b'a', b'y'];
+        assert!(matches!(KeyCodec::decode(&forged), Err(Error::Corrupt(_))));
     }
 
     #[test]
