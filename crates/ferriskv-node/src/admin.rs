@@ -145,6 +145,8 @@ mod tests {
             ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 5,
             wal_rotate_bytes: 64 * 1024 * 1024,
+            watch_buffer: 1024,
+            watch_heartbeat_secs: 30,
         };
         (Arc::new(NodeService::open(cfg).unwrap()), dir)
     }

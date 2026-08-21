@@ -87,6 +87,19 @@ pub struct NodeConfig {
     pub ttl_sweep_interval_secs: u64,
     #[serde(default = "default_shutdown_secs")]
     pub shutdown_timeout_secs: u64,
+    /// Events a Watch subscriber may fall behind by before its stream is
+    /// terminated.
+    ///
+    /// A subscriber that outruns this buffer is told it lost events rather than
+    /// being silently skipped, so the bound trades memory per stream against how
+    /// tolerant the node is of a slow client.
+    #[serde(default = "default_watch_buffer")]
+    pub watch_buffer: usize,
+    /// How often an idle Watch stream emits a heartbeat, in seconds.
+    ///
+    /// Without it a client cannot tell a quiet keyspace from a dead connection.
+    #[serde(default = "default_watch_heartbeat_secs")]
+    pub watch_heartbeat_secs: u64,
     /// Size at which the WAL segment is rotated, in bytes.
     ///
     /// Rotation drops records that storage already holds, so it is what keeps
@@ -119,6 +132,14 @@ fn default_wal_rotate_bytes() -> u64 {
     64 * 1024 * 1024
 }
 
+fn default_watch_buffer() -> usize {
+    1024
+}
+
+fn default_watch_heartbeat_secs() -> u64 {
+    30
+}
+
 impl NodeConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.node_id.is_empty() {
@@ -139,6 +160,14 @@ impl NodeConfig {
         // every put into a storage fsync.
         if self.wal_rotate_bytes < 4096 {
             return Err("wal_rotate_bytes must be at least 4096".into());
+        }
+        // A zero-capacity broadcast channel cannot be constructed, and a
+        // one-event buffer makes every subscriber lag on its second event.
+        if self.watch_buffer < 2 {
+            return Err("watch_buffer must be at least 2".into());
+        }
+        if self.watch_heartbeat_secs == 0 {
+            return Err("watch_heartbeat_secs must be > 0".into());
         }
         if let Some(parent) = self.data_dir.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -183,6 +212,8 @@ mod tests {
             ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 10,
             wal_rotate_bytes: default_wal_rotate_bytes(),
+            watch_buffer: default_watch_buffer(),
+            watch_heartbeat_secs: default_watch_heartbeat_secs(),
         }
     }
 
@@ -201,6 +232,8 @@ mod tests {
         assert_eq!(cfg.limits.max_value_size, 10 * 1024 * 1024);
         assert_eq!(cfg.shutdown_timeout_secs, 10);
         assert_eq!(cfg.wal_rotate_bytes, 64 * 1024 * 1024);
+        assert_eq!(cfg.watch_buffer, 1024);
+        assert_eq!(cfg.watch_heartbeat_secs, 30);
         assert!(!cfg.auth.insecure);
         assert!(cfg.tls.is_none());
     }
@@ -217,6 +250,38 @@ mod tests {
         "#,
         );
         assert_eq!(cfg.wal_rotate_bytes, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parses_watch_settings() {
+        let cfg = parse(
+            r#"
+            node_id = "n0"
+            listen = "127.0.0.1:7100"
+            data_dir = "/tmp/ferriskv-node"
+            coord_endpoints = []
+            watch_buffer = 64
+            watch_heartbeat_secs = 5
+        "#,
+        );
+        assert_eq!(cfg.watch_buffer, 64);
+        assert_eq!(cfg.watch_heartbeat_secs, 5);
+    }
+
+    #[test]
+    fn validate_rejects_a_watch_buffer_that_lags_immediately() {
+        let mut c = base_cfg();
+        c.watch_buffer = 1;
+        assert!(c.validate().is_err());
+        c.watch_buffer = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_a_heartbeat_that_never_fires() {
+        let mut c = base_cfg();
+        c.watch_heartbeat_secs = 0;
+        assert!(c.validate().is_err());
     }
 
     #[test]

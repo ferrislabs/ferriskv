@@ -12,7 +12,8 @@ use ferriskv_node::{
 use ferriskv_proto::ferris_kv_client::FerrisKvClient;
 use ferriskv_proto::ferris_kv_server::FerrisKvServer;
 use ferriskv_proto::{
-    BatchOp, BatchRequest, DeleteRequest, GetRequest, PutRequest, ScanRequest, WatchRequest,
+    BatchOp, BatchRequest, DeleteRequest, GetRequest, PutRequest, ScanRequest, WatchEvent,
+    WatchEventKind, WatchRequest,
 };
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use tempfile::TempDir;
@@ -38,10 +39,26 @@ async fn spawn_secure_server(secret: &[u8]) -> SocketAddr {
     spawn_with(Limits::default(), AuthInterceptor::with_verifier(verifier)).await
 }
 
+async fn spawn_watch_server(watch_buffer: usize, heartbeat_secs: u64) -> SocketAddr {
+    spawn_tuned(Limits::default(), AuthInterceptor::insecure(), |cfg| {
+        cfg.watch_buffer = watch_buffer;
+        cfg.watch_heartbeat_secs = heartbeat_secs;
+    })
+    .await
+}
+
 async fn spawn_with(limits: Limits, interceptor: AuthInterceptor) -> SocketAddr {
+    spawn_tuned(limits, interceptor, |_| {}).await
+}
+
+async fn spawn_tuned(
+    limits: Limits,
+    interceptor: AuthInterceptor,
+    tune: impl FnOnce(&mut NodeConfig),
+) -> SocketAddr {
     let addr = pick_port();
     let dir = TempDir::new().unwrap();
-    let cfg = NodeConfig {
+    let mut cfg = NodeConfig {
         node_id: Arc::<str>::from("test-node"),
         listen: addr,
         data_dir: dir.path().to_path_buf(),
@@ -57,7 +74,10 @@ async fn spawn_with(limits: Limits, interceptor: AuthInterceptor) -> SocketAddr 
         ttl_sweep_interval_secs: 0,
         shutdown_timeout_secs: 5,
         wal_rotate_bytes: 64 * 1024 * 1024,
+        watch_buffer: 1024,
+        watch_heartbeat_secs: 30,
     };
+    tune(&mut cfg);
     let service = Arc::new(NodeService::open(cfg).unwrap());
     let api = GrpcApi::new(service);
     tokio::spawn(async move {
@@ -330,19 +350,248 @@ async fn batch_rejects_unknown_opcode() {
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
-#[tokio::test]
-async fn watch_is_unimplemented() {
-    let addr = spawn_server().await;
-    let mut client = connect(addr).await;
-
-    let err = client
+/// Opens a watch stream and waits until the server has actually registered the
+/// subscription.
+///
+/// `watch()` returning is not enough: the response arrives before the handler's
+/// `subscribe` is guaranteed to have run, so a write issued immediately after
+/// can be published to nobody. Every test here would then be flaky in the
+/// direction that looks like a bug in the feature.
+async fn open_watch(
+    client: &mut FerrisKvClient<tonic::transport::Channel>,
+    tenant: &str,
+    prefix: &'static [u8],
+) -> tonic::Streaming<WatchEvent> {
+    let stream = client
         .watch(WatchRequest {
-            tenant: "alice".into(),
-            prefix: Bytes::from_static(b""),
+            tenant: tenant.into(),
+            prefix: Bytes::from_static(prefix),
         })
         .await
+        .unwrap()
+        .into_inner();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    stream
+}
+
+async fn next_event(stream: &mut tonic::Streaming<WatchEvent>) -> WatchEvent {
+    tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .expect("watch stream produced no event within 5s")
+        .unwrap()
+        .expect("watch stream ended unexpectedly")
+}
+
+#[tokio::test]
+async fn watch_reports_puts_and_deletes() {
+    let addr = spawn_server().await;
+    let mut client = connect(addr).await;
+    let mut stream = open_watch(&mut client, "alice", b"").await;
+
+    client
+        .put(PutRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"watched"),
+            value: Bytes::from_static(b"v1"),
+            ttl_ms: 0,
+        })
+        .await
+        .unwrap();
+
+    let event = next_event(&mut stream).await;
+    assert_eq!(event.kind(), WatchEventKind::Put);
+    assert_eq!(&event.key[..], b"watched");
+    assert_eq!(&event.value[..], b"v1");
+
+    client
+        .delete(DeleteRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"watched"),
+        })
+        .await
+        .unwrap();
+
+    let event = next_event(&mut stream).await;
+    assert_eq!(event.kind(), WatchEventKind::Delete);
+    assert_eq!(&event.key[..], b"watched");
+    assert!(
+        event.value.is_empty(),
+        "a delete carries no value to report",
+    );
+}
+
+#[tokio::test]
+async fn watch_only_reports_keys_under_the_requested_prefix() {
+    let addr = spawn_server().await;
+    let mut client = connect(addr).await;
+    let mut stream = open_watch(&mut client, "alice", b"cache:").await;
+
+    for key in [&b"other:1"[..], b"cache:hit", b"cacheless"] {
+        client
+            .put(PutRequest {
+                tenant: "alice".into(),
+                key: Bytes::copy_from_slice(key),
+                value: Bytes::from_static(b"v"),
+                ttl_ms: 0,
+            })
+            .await
+            .unwrap();
+    }
+
+    let event = next_event(&mut stream).await;
+    assert_eq!(
+        &event.key[..],
+        b"cache:hit",
+        "the two non-matching keys must not appear at all",
+    );
+}
+
+#[tokio::test]
+async fn watch_never_leaks_across_tenants() {
+    let addr = spawn_server().await;
+    let mut client = connect(addr).await;
+    // An empty prefix is the widest subscription a client can ask for. If
+    // anything is going to escape a tenant, it is this.
+    let mut stream = open_watch(&mut client, "alice", b"").await;
+
+    client
+        .put(PutRequest {
+            tenant: "bob".into(),
+            key: Bytes::from_static(b"bob-only"),
+            value: Bytes::from_static(b"secret"),
+            ttl_ms: 0,
+        })
+        .await
+        .unwrap();
+    client
+        .put(PutRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"alice-key"),
+            value: Bytes::from_static(b"v"),
+            ttl_ms: 0,
+        })
+        .await
+        .unwrap();
+
+    let event = next_event(&mut stream).await;
+    assert_eq!(
+        &event.key[..],
+        b"alice-key",
+        "bob's write must not reach alice's stream",
+    );
+}
+
+#[tokio::test]
+async fn watch_reports_a_batch_op_by_op() {
+    let addr = spawn_server().await;
+    let mut client = connect(addr).await;
+    let mut stream = open_watch(&mut client, "alice", b"").await;
+
+    client
+        .batch(BatchRequest {
+            tenant: "alice".into(),
+            ops: vec![
+                BatchOp {
+                    op: 1,
+                    key: Bytes::from_static(b"one"),
+                    value: Bytes::from_static(b"1"),
+                },
+                BatchOp {
+                    op: 1,
+                    key: Bytes::from_static(b"two"),
+                    value: Bytes::from_static(b"2"),
+                },
+                BatchOp {
+                    op: 2,
+                    key: Bytes::from_static(b"one"),
+                    value: Bytes::new(),
+                },
+            ],
+        })
+        .await
+        .unwrap();
+
+    let seen: Vec<_> = {
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            let e = next_event(&mut stream).await;
+            out.push((e.kind(), e.key.to_vec()));
+        }
+        out
+    };
+    assert_eq!(
+        seen,
+        vec![
+            (WatchEventKind::Put, b"one".to_vec()),
+            (WatchEventKind::Put, b"two".to_vec()),
+            (WatchEventKind::Delete, b"one".to_vec()),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn watch_sends_a_heartbeat_while_idle() {
+    let addr = spawn_watch_server(1024, 1).await;
+    let mut client = connect(addr).await;
+    let mut stream = open_watch(&mut client, "alice", b"").await;
+
+    // No writes at all: whatever arrives is the liveness signal.
+    let event = next_event(&mut stream).await;
+    assert_eq!(event.kind(), WatchEventKind::Heartbeat);
+    assert!(event.key.is_empty());
+    assert!(event.value.is_empty());
+}
+
+#[tokio::test]
+async fn watch_requires_the_watch_permission() {
+    let secret = b"hunter2";
+    let addr = spawn_secure_server(secret).await;
+    let mut client = connect(addr).await;
+
+    let no_watch = make_token(secret, "alice", &["read", "write"]);
+    let err = client
+        .watch(with_auth(
+            WatchRequest {
+                tenant: "alice".into(),
+                prefix: Bytes::new(),
+            },
+            &no_watch,
+        ))
+        .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+    let allowed = make_token(secret, "alice", &["watch"]);
+    client
+        .watch(with_auth(
+            WatchRequest {
+                tenant: "alice".into(),
+                prefix: Bytes::new(),
+            },
+            &allowed,
+        ))
+        .await
+        .expect("the watch permission must be enough to open a stream");
+}
+
+#[tokio::test]
+async fn watch_rejects_a_foreign_tenant() {
+    let secret = b"hunter2";
+    let addr = spawn_secure_server(secret).await;
+    let mut client = connect(addr).await;
+    let alice = make_token(secret, "alice", &["watch"]);
+
+    let err = client
+        .watch(with_auth(
+            WatchRequest {
+                tenant: "bob".into(),
+                prefix: Bytes::new(),
+            },
+            &alice,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
 #[tokio::test]
