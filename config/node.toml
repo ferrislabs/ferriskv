@@ -8,6 +8,13 @@ shutdown_timeout_secs = 3600
 # Rotate the WAL segment past this size. Rotation costs one storage fsync,
 # and is what keeps the log from growing for the whole uptime of the node.
 wal_rotate_bytes = 67108864
+# Events a Watch subscriber may fall behind by before its stream is terminated
+# with DataLoss. Higher is more tolerant of a slow client, at a cost in memory
+# per stream.
+watch_buffer = 1024
+# How often an idle Watch stream emits a heartbeat, so a client can tell a quiet
+# keyspace from a dead connection.
+watch_heartbeat_secs = 30
 
 [auth]
 insecure = true

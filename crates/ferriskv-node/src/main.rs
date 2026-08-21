@@ -90,6 +90,8 @@ async fn main() -> Result<()> {
             ttl_sweep_interval_secs: 60,
             shutdown_timeout_secs: 10,
             wal_rotate_bytes: 64 * 1024 * 1024,
+            watch_buffer: 1024,
+            watch_heartbeat_secs: 30,
         }
     };
 
@@ -223,6 +225,18 @@ fn describe_metrics() {
     metrics::describe_gauge!(
         "ferriskv_ttl_index_size",
         "Number of keys currently scheduled in the in-memory TTL index"
+    );
+    metrics::describe_gauge!(
+        "ferriskv_watch_streams",
+        "Number of Watch streams currently open"
+    );
+    metrics::describe_counter!(
+        "ferriskv_watch_events_total",
+        "Total number of events delivered to Watch streams, by kind"
+    );
+    metrics::describe_counter!(
+        "ferriskv_watch_lagged_total",
+        "Total number of Watch streams terminated for falling behind the event buffer"
     );
 }
 

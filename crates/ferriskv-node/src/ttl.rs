@@ -173,7 +173,11 @@ pub fn sweep_once(service: &NodeService) -> usize {
     for key in &candidates {
         match service.storage.get(key) {
             Ok(Some(raw)) => match ValueCodec::is_expired(&raw, now_ms) {
-                Ok(true) => match service.storage.delete(key) {
+                // Through the service rather than straight to storage, so an
+                // eviction is a real delete: it gets a WAL record, and watchers
+                // are told. A watcher whose keys vanish without an event would
+                // hold a view of the keyspace that silently diverges.
+                Ok(true) => match service.delete(key) {
                     Ok(()) => removed += 1,
                     Err(e) => tracing::warn!(error = %e, "ttl sweeper: delete failed"),
                 },
@@ -203,11 +207,12 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use ferriskv_core::Clock;
+    use ferriskv_core::{Clock, KeyCodec, Subspace};
     use tempfile::TempDir;
 
     use super::*;
     use crate::config::{AuthConfig, Backend};
+    use crate::watch::ChangeKind;
     use crate::{NodeConfig, NodeService};
 
     #[test]
@@ -296,6 +301,8 @@ mod tests {
             ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 5,
             wal_rotate_bytes: 64 * 1024 * 1024,
+            watch_buffer: 1024,
+            watch_heartbeat_secs: 30,
         }
     }
 
@@ -317,6 +324,49 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert!(keys.contains(&b"a".as_ref()));
         assert!(keys.contains(&b"c".as_ref()));
+    }
+
+    #[test]
+    fn an_eviction_is_announced_to_watchers() {
+        // A key that disappears on its own is the one case a watcher cannot
+        // discover for itself: no client wrote anything, so without an event its
+        // view of the keyspace silently diverges from the node's.
+        let dir = TempDir::new().unwrap();
+        let clock = Clock::manual(0);
+        let svc = NodeService::open_with_clock(cfg(&dir), clock.clone()).unwrap();
+
+        let mut rx = svc.watch.subscribe("alice");
+        let key = KeyCodec::encode("alice", Subspace::Data, b"ephemeral").unwrap();
+        svc.put_with_ttl(&key, b"v", 100).unwrap();
+        assert_eq!(rx.try_recv().unwrap().kind, ChangeKind::Put);
+
+        clock.advance(200);
+        assert_eq!(sweep_once(&svc), 1);
+
+        let event = rx.try_recv().expect("the eviction must be published");
+        assert_eq!(event.kind, ChangeKind::Delete);
+        assert_eq!(&event.key[..], b"ephemeral");
+        assert!(event.value.is_empty());
+    }
+
+    #[test]
+    fn an_eviction_is_recorded_in_the_wal() {
+        // Going through the service rather than straight to storage is what
+        // gives the eviction a WAL record. Without one, replay after a crash
+        // would resurrect the key.
+        let dir = TempDir::new().unwrap();
+        let clock = Clock::manual(0);
+        let svc = NodeService::open_with_clock(cfg(&dir), clock.clone()).unwrap();
+        svc.put_with_ttl(b"k", b"v", 100).unwrap();
+        let before = svc.wal.next_seq();
+
+        clock.advance(200);
+        assert_eq!(sweep_once(&svc), 1);
+        assert_eq!(
+            svc.wal.next_seq(),
+            before + 1,
+            "the eviction must append exactly one record",
+        );
     }
 
     #[test]

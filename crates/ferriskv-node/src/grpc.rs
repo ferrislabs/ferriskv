@@ -1,21 +1,27 @@
 #![allow(clippy::result_large_err)]
 
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use ferriskv_core::{Error, KeyCodec, Subspace};
 use ferriskv_proto::ferris_kv_server::FerrisKv;
 use ferriskv_proto::{
     BatchRequest, BatchResponse, DeleteRequest, DeleteResponse, GetRequest, GetResponse, KeyValue,
-    PutRequest, PutResponse, ScanChunk, ScanRequest, WatchEvent, WatchRequest,
+    PutRequest, PutResponse, ScanChunk, ScanRequest, WatchEvent, WatchEventKind, WatchRequest,
 };
 use futures::stream::Iter;
+use futures::Stream;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::Receiver;
+use tokio::time::Instant as TokioInstant;
 use tonic::{Request, Response, Status};
 
 use crate::audit;
 use crate::auth_layer::Principal;
 use crate::service::NodeService;
+use crate::watch::{ChangeKind, KeyChange};
 
 const PERM_READ: &str = "read";
 const PERM_WRITE: &str = "write";
@@ -195,6 +201,148 @@ fn record_rpc<T>(rpc: &'static str, tenant: &str, start: Instant, result: &Resul
     .record(start.elapsed().as_secs_f64());
 }
 
+#[inline]
+fn to_watch_event(change: KeyChange) -> WatchEvent {
+    let kind = match change.kind {
+        ChangeKind::Put => WatchEventKind::Put,
+        ChangeKind::Delete => WatchEventKind::Delete,
+    };
+    WatchEvent {
+        kind: kind as i32,
+        key: change.key,
+        value: change.value,
+        // Filled in once MVCC gives writes a version (#22).
+        version: 0,
+    }
+}
+
+#[inline]
+fn heartbeat_event() -> WatchEvent {
+    WatchEvent {
+        kind: WatchEventKind::Heartbeat as i32,
+        key: Bytes::new(),
+        value: Bytes::new(),
+        version: 0,
+    }
+}
+
+/// Keeps the active-stream gauge honest even when a client disappears.
+///
+/// A `Watch` stream ends by being dropped — the client goes away, the server
+/// shuts down, a proxy times out — and none of those run any code in the
+/// handler. Tying the decrement to a guard's `Drop` is the only version of this
+/// that cannot drift.
+struct StreamGauge;
+
+impl StreamGauge {
+    fn new() -> Self {
+        metrics::gauge!("ferriskv_watch_streams").increment(1.0);
+        Self
+    }
+}
+
+impl Drop for StreamGauge {
+    fn drop(&mut self) {
+        metrics::gauge!("ferriskv_watch_streams").decrement(1.0);
+    }
+}
+
+struct WatchState {
+    rx: Receiver<KeyChange>,
+    prefix: Bytes,
+    heartbeat: Duration,
+    /// When the next heartbeat is due, as an absolute deadline.
+    ///
+    /// Absolute rather than a fresh relative sleep per loop iteration, because
+    /// the loop also spins on events filtered out by the prefix. A relative
+    /// timer would be reset by each of those, so a tenant with heavy traffic
+    /// outside a subscriber's prefix would starve that subscriber of heartbeats
+    /// entirely — the one case where it most needs to know the stream is alive.
+    next_beat: TokioInstant,
+    tenant: String,
+    _gauge: StreamGauge,
+}
+
+impl WatchState {
+    fn defer_heartbeat(&mut self) {
+        self.next_beat = TokioInstant::now() + self.heartbeat;
+    }
+}
+
+/// Turns a tenant's change feed into the client's event stream.
+///
+/// Filters to the requested prefix, and emits a heartbeat whenever the feed has
+/// been quiet for `heartbeat`, so a client can distinguish an idle keyspace from
+/// a connection that died silently.
+fn watch_stream(state: WatchState) -> impl Stream<Item = Result<WatchEvent, Status>> + Send {
+    futures::stream::unfold(Some(state), |state| async move {
+        let mut state = state?;
+        loop {
+            let idle = tokio::time::sleep_until(state.next_beat);
+            tokio::pin!(idle);
+
+            tokio::select! {
+                _ = &mut idle => {
+                    metrics::counter!(
+                        "ferriskv_watch_events_total",
+                        "kind" => "heartbeat",
+                        "tenant" => state.tenant.clone(),
+                    )
+                    .increment(1);
+                    state.defer_heartbeat();
+                    return Some((Ok(heartbeat_event()), Some(state)));
+                }
+                received = state.rx.recv() => match received {
+                    Ok(change) => {
+                        if !change.key.starts_with(&state.prefix) {
+                            continue;
+                        }
+                        let kind = match change.kind {
+                            ChangeKind::Put => "put",
+                            ChangeKind::Delete => "delete",
+                        };
+                        metrics::counter!(
+                            "ferriskv_watch_events_total",
+                            "kind" => kind,
+                            "tenant" => state.tenant.clone(),
+                        )
+                        .increment(1);
+                        // A delivered event proves the stream is alive just as
+                        // well as a heartbeat would, so the next beat moves out.
+                        state.defer_heartbeat();
+                        return Some((Ok(to_watch_event(change)), Some(state)));
+                    }
+                    // The subscriber outran the buffer. Continuing would hand it
+                    // a keyspace with holes it has no way to detect, so the
+                    // stream ends and says how much it lost: the client's only
+                    // correct move is to re-read and resubscribe.
+                    Err(RecvError::Lagged(missed)) => {
+                        metrics::counter!(
+                            "ferriskv_watch_lagged_total",
+                            "tenant" => state.tenant.clone(),
+                        )
+                        .increment(1);
+                        tracing::warn!(
+                            tenant = %state.tenant,
+                            missed,
+                            "watch stream fell behind and was terminated",
+                        );
+                        return Some((
+                            Err(Status::data_loss(format!(
+                                "watch fell behind by {missed} events; re-read and resubscribe"
+                            ))),
+                            None,
+                        ));
+                    }
+                    // Only reachable once the hub itself is gone, i.e. the node
+                    // is shutting down.
+                    Err(RecvError::Closed) => return None,
+                },
+            }
+        }
+    })
+}
+
 impl GrpcApi {
     async fn get_impl(&self, req: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
         check_tenant(&req.get_ref().tenant)?;
@@ -300,13 +448,39 @@ impl GrpcApi {
         Ok(Response::new(futures::stream::iter(chunks)))
     }
 
+    /// Streams changes to a tenant's keys under `prefix`.
+    ///
+    /// The stream starts from now. There is no history to replay from: the node
+    /// has no version to seek to until MVCC lands (#22), so a client that needs
+    /// a consistent starting point scans first and then watches, accepting the
+    /// overlap. Subscribing before the scan is the safer order, since an event
+    /// seen twice is recoverable and one missed is not.
     async fn watch_impl(
         &self,
         req: Request<WatchRequest>,
     ) -> Result<Response<<Self as FerrisKv>::WatchStream>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_WATCH)?;
-        Err(Status::unimplemented("watch not implemented yet"))
+        let r = req.into_inner();
+        self.enforce_key_size(&r.prefix)?;
+
+        let rx = self.inner.watch.subscribe(&r.tenant);
+        tracing::debug!(
+            tenant = %r.tenant,
+            prefix_len = r.prefix.len(),
+            "watch stream opened",
+        );
+
+        let heartbeat = Duration::from_secs(self.inner.config.watch_heartbeat_secs);
+        let state = WatchState {
+            rx,
+            prefix: r.prefix,
+            heartbeat,
+            next_beat: TokioInstant::now() + heartbeat,
+            tenant: r.tenant,
+            _gauge: StreamGauge::new(),
+        };
+        Ok(Response::new(Box::pin(watch_stream(state))))
     }
 
     async fn batch_impl(
@@ -397,7 +571,9 @@ impl FerrisKv for GrpcApi {
         result
     }
 
-    type WatchStream = Iter<std::vec::IntoIter<Result<WatchEvent, Status>>>;
+    // Boxed rather than a named type: the stream is a `select!` over a
+    // broadcast receiver and a timer, which has no nameable type.
+    type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchEvent, Status>> + Send>>;
 
     async fn watch(
         &self,
@@ -416,5 +592,166 @@ impl FerrisKv for GrpcApi {
         let result = self.batch_impl(req).await;
         record_rpc("batch", &tenant, start, &result);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    fn change(kind: ChangeKind, key: &'static str) -> KeyChange {
+        KeyChange {
+            kind,
+            key: Bytes::from_static(key.as_bytes()),
+            value: Bytes::from_static(b"v"),
+        }
+    }
+
+    fn state(rx: Receiver<KeyChange>, prefix: &'static [u8], heartbeat_ms: u64) -> WatchState {
+        let heartbeat = Duration::from_millis(heartbeat_ms);
+        WatchState {
+            rx,
+            prefix: Bytes::from_static(prefix),
+            heartbeat,
+            next_beat: TokioInstant::now() + heartbeat,
+            tenant: "alice".to_string(),
+            _gauge: StreamGauge::new(),
+        }
+    }
+
+    /// A stream that falls behind must report it, and reporting it must end the
+    /// stream.
+    ///
+    /// This is unit-tested rather than driven through gRPC on purpose: HTTP/2
+    /// flow control buffers a burst of small events, so an integration test
+    /// cannot reliably make a subscriber lag. It would pass for the wrong reason
+    /// today and stop testing anything the moment the buffer size changed.
+    #[tokio::test]
+    async fn a_lagging_stream_ends_with_data_loss() {
+        let (tx, rx) = broadcast::channel(2);
+        for i in 0..16 {
+            tx.send(KeyChange {
+                kind: ChangeKind::Put,
+                key: Bytes::from(format!("k{i}")),
+                value: Bytes::new(),
+            })
+            .unwrap();
+        }
+
+        let mut stream = Box::pin(watch_stream(state(rx, b"", 60_000)));
+        let status = stream
+            .next()
+            .await
+            .expect("the stream must yield the failure, not just end")
+            .expect_err("a receiver 14 events behind a 2-event buffer must have lagged");
+        assert_eq!(status.code(), tonic::Code::DataLoss);
+        assert!(
+            status.message().contains("resubscribe"),
+            "the error has to tell the client what to do: {}",
+            status.message(),
+        );
+
+        assert!(
+            stream.next().await.is_none(),
+            "a stream that lost events must not carry on as if it had not",
+        );
+    }
+
+    #[tokio::test]
+    async fn events_outside_the_prefix_never_reach_the_client() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(change(ChangeKind::Put, "other:1")).unwrap();
+        tx.send(change(ChangeKind::Put, "cacheless")).unwrap();
+        tx.send(change(ChangeKind::Delete, "cache:hit")).unwrap();
+
+        let mut stream = Box::pin(watch_stream(state(rx, b"cache:", 60_000)));
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.kind(), WatchEventKind::Delete);
+        assert_eq!(&event.key[..], b"cache:hit");
+    }
+
+    #[tokio::test]
+    async fn an_idle_stream_heartbeats_instead_of_going_quiet() {
+        let (_tx, rx) = broadcast::channel(16);
+        let mut stream = Box::pin(watch_stream(state(rx, b"", 20)));
+
+        for _ in 0..2 {
+            let event = stream.next().await.unwrap().unwrap();
+            assert_eq!(event.kind(), WatchEventKind::Heartbeat);
+            assert!(event.key.is_empty());
+            assert!(event.value.is_empty());
+        }
+    }
+
+    /// Traffic a subscriber filters out must not starve it of heartbeats.
+    ///
+    /// The filtered branch loops without yielding, so a heartbeat measured as a
+    /// fresh delay per iteration would be reset by every non-matching event and
+    /// never fire. A subscriber on a narrow prefix in a busy tenant would then
+    /// go permanently silent — exactly when it most needs to know the stream is
+    /// still alive.
+    #[tokio::test]
+    async fn a_flood_of_filtered_events_does_not_starve_the_heartbeat() {
+        let (tx, rx) = broadcast::channel(256);
+        let noise = tokio::spawn(async move {
+            for i in 0..200 {
+                if tx
+                    .send(KeyChange {
+                        kind: ChangeKind::Put,
+                        key: Bytes::from(format!("elsewhere:{i}")),
+                        value: Bytes::new(),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let mut stream = Box::pin(watch_stream(state(rx, b"mine:", 40)));
+        let event = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .expect("no heartbeat arrived while filtered events kept flowing")
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.kind(), WatchEventKind::Heartbeat);
+        noise.abort();
+    }
+
+    /// A quiet keyspace must not starve real events, and a busy one must not
+    /// starve the heartbeat's own timer.
+    #[tokio::test]
+    async fn a_real_event_wins_over_a_pending_heartbeat() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(change(ChangeKind::Put, "k")).unwrap();
+
+        let mut stream = Box::pin(watch_stream(state(rx, b"", 60_000)));
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.kind(), WatchEventKind::Put);
+        assert_eq!(&event.key[..], b"k");
+    }
+
+    #[tokio::test]
+    async fn the_stream_ends_when_the_hub_goes_away() {
+        let (tx, rx) = broadcast::channel(16);
+        drop(tx);
+        let mut stream = Box::pin(watch_stream(state(rx, b"", 60_000)));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[test]
+    fn a_delete_event_carries_no_value() {
+        let event = to_watch_event(KeyChange {
+            kind: ChangeKind::Delete,
+            key: Bytes::from_static(b"gone"),
+            value: Bytes::new(),
+        });
+        assert_eq!(event.kind(), WatchEventKind::Delete);
+        assert!(event.value.is_empty());
+        assert_eq!(event.version, 0);
     }
 }
