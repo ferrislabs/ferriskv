@@ -21,6 +21,7 @@ bloomfilter = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 divan = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "codec"

@@ -8,6 +8,7 @@ members = [
     "crates/ferriskv-auth",
     "crates/ferriskv-cli",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -54,6 +55,7 @@ futures = "0.3.32"
 parking_lot = "0.12.5"
 tempfile = "3"
 divan = { package = "codspeed-divan-compat", version = "3" }
+proptest = "1"
 
 ferriskv-core = { path = "crates/ferriskv-core" }
 ferriskv-proto = { path = "crates/ferriskv-proto" }

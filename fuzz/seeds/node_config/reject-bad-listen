@@ -1,0 +1,4 @@
+node_id = "n0"
+listen = "not-an-address"
+data_dir = "/tmp/x"
+coord_endpoints = []
