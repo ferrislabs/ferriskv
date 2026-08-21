@@ -19,6 +19,14 @@ watch_heartbeat_secs = 30
 [auth]
 insecure = true
 
+# Node-wide quota defaults, applied to any tenant without a record of its own.
+# 0 means unlimited on both fields, which is the default: a node should not
+# enforce a limit its operator never chose. Per-tenant overrides are set through
+# the admin API (PUT /quotas/<tenant>) and persist in the tenant's metadata.
+[quota]
+default_max_bytes = 0
+default_max_ops_per_sec = 0
+
 [limits]
 max_key_size = 4096
 max_value_size = 10485760

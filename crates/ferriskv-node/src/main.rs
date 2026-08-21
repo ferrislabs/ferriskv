@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
             ttl_sweep_interval_secs: 60,
             shutdown_timeout_secs: 10,
             wal_rotate_bytes: 64 * 1024 * 1024,
+            quota: Default::default(),
             watch_buffer: 1024,
             watch_heartbeat_secs: 30,
         }
@@ -237,6 +238,14 @@ fn describe_metrics() {
     metrics::describe_counter!(
         "ferriskv_watch_lagged_total",
         "Total number of Watch streams terminated for falling behind the event buffer"
+    );
+    metrics::describe_gauge!(
+        "ferriskv_tenant_bytes_used",
+        "Bytes of keys and values stored per tenant, as counted against its quota"
+    );
+    metrics::describe_counter!(
+        "ferriskv_throttled_total",
+        "Total number of requests refused for exceeding a tenant's operation rate"
     );
 }
 

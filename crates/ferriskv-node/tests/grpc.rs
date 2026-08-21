@@ -74,6 +74,7 @@ async fn spawn_tuned(
         ttl_sweep_interval_secs: 0,
         shutdown_timeout_secs: 5,
         wal_rotate_bytes: 64 * 1024 * 1024,
+        quota: Default::default(),
         watch_buffer: 1024,
         watch_heartbeat_secs: 30,
     };
@@ -592,6 +593,262 @@ async fn watch_rejects_a_foreign_tenant() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}
+
+async fn spawn_quota_server(max_bytes: u64, max_ops_per_sec: u32) -> SocketAddr {
+    spawn_tuned(Limits::default(), AuthInterceptor::insecure(), |cfg| {
+        cfg.quota.default_max_bytes = max_bytes;
+        cfg.quota.default_max_ops_per_sec = max_ops_per_sec;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_write_over_the_storage_quota_is_resource_exhausted() {
+    let addr = spawn_quota_server(64, 0).await;
+    let mut client = connect(addr).await;
+
+    client
+        .put(PutRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"k"),
+            value: Bytes::from(vec![b'x'; 40]),
+            ttl_ms: 0,
+        })
+        .await
+        .unwrap();
+
+    let err = client
+        .put(PutRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"k2"),
+            value: Bytes::from(vec![b'x'; 40]),
+            ttl_ms: 0,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+
+    // The refused key must not be readable: a quota refusal is not a partial
+    // success.
+    let g = client
+        .get(GetRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"k2"),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!g.found);
+}
+
+#[tokio::test]
+async fn a_quota_refusal_does_not_affect_other_tenants() {
+    let addr = spawn_quota_server(64, 0).await;
+    let mut client = connect(addr).await;
+
+    client
+        .put(PutRequest {
+            tenant: "noisy".into(),
+            key: Bytes::from_static(b"k"),
+            value: Bytes::from(vec![b'x'; 60]),
+            ttl_ms: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .put(PutRequest {
+                tenant: "noisy".into(),
+                key: Bytes::from_static(b"k2"),
+                value: Bytes::from(vec![b'x'; 60]),
+                ttl_ms: 0,
+            })
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::ResourceExhausted,
+    );
+
+    client
+        .put(PutRequest {
+            tenant: "quiet".into(),
+            key: Bytes::from_static(b"k"),
+            value: Bytes::from(vec![b'x'; 60]),
+            ttl_ms: 0,
+        })
+        .await
+        .expect("a quiet tenant must not pay for a noisy one");
+}
+
+#[tokio::test]
+async fn deleting_frees_quota_for_the_next_write() {
+    let addr = spawn_quota_server(64, 0).await;
+    let mut client = connect(addr).await;
+
+    client
+        .put(PutRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"k"),
+            value: Bytes::from(vec![b'x'; 60]),
+            ttl_ms: 0,
+        })
+        .await
+        .unwrap();
+    assert!(client
+        .put(PutRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"k2"),
+            value: Bytes::from(vec![b'x'; 60]),
+            ttl_ms: 0,
+        })
+        .await
+        .is_err());
+
+    client
+        .delete(DeleteRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"k"),
+        })
+        .await
+        .unwrap();
+
+    client
+        .put(PutRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"k2"),
+            value: Bytes::from(vec![b'x'; 60]),
+            ttl_ms: 0,
+        })
+        .await
+        .expect("the deleted bytes must be usable again");
+}
+
+#[tokio::test]
+async fn a_tenant_over_its_rate_limit_is_resource_exhausted() {
+    let addr = spawn_quota_server(0, 5).await;
+    let mut client = connect(addr).await;
+
+    let mut throttled = false;
+    for i in 0..40 {
+        let outcome = client
+            .put(PutRequest {
+                tenant: "alice".into(),
+                key: Bytes::from(format!("k{i}").into_bytes()),
+                value: Bytes::from_static(b"v"),
+                ttl_ms: 0,
+            })
+            .await;
+        if let Err(status) = outcome {
+            assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+            throttled = true;
+            break;
+        }
+    }
+    assert!(throttled, "40 writes against a 5/s limit must be throttled");
+}
+
+#[tokio::test]
+async fn reads_are_throttled_too() {
+    // A tenant can saturate a node with reads just as effectively as with
+    // writes, so a limit that only covered writes would not be a limit.
+    let addr = spawn_quota_server(0, 5).await;
+    let mut client = connect(addr).await;
+
+    let mut throttled = false;
+    for _ in 0..40 {
+        if let Err(status) = client
+            .get(GetRequest {
+                tenant: "alice".into(),
+                key: Bytes::from_static(b"absent"),
+            })
+            .await
+        {
+            assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+            throttled = true;
+            break;
+        }
+    }
+    assert!(throttled);
+}
+
+#[tokio::test]
+async fn a_batch_cannot_be_used_to_bypass_the_rate_limit() {
+    // Charging one operation per RPC would make the limit meaningless against
+    // any client willing to batch.
+    let addr = spawn_quota_server(0, 4).await;
+    let mut client = connect(addr).await;
+
+    let ops: Vec<BatchOp> = (0..4)
+        .map(|i| BatchOp {
+            op: 1,
+            key: Bytes::from(format!("k{i}").into_bytes()),
+            value: Bytes::from_static(b"v"),
+        })
+        .collect();
+    client
+        .batch(BatchRequest {
+            tenant: "alice".into(),
+            ops,
+        })
+        .await
+        .unwrap();
+
+    let err = client
+        .put(PutRequest {
+            tenant: "alice".into(),
+            key: Bytes::from_static(b"one-more"),
+            value: Bytes::from_static(b"v"),
+            ttl_ms: 0,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        tonic::Code::ResourceExhausted,
+        "the batch must have consumed the whole allowance",
+    );
+}
+
+#[tokio::test]
+async fn a_request_costing_more_than_the_whole_allowance_is_invalid_not_throttled() {
+    // No amount of waiting admits it, so reporting it as a rate limit would send
+    // the client into a retry loop that can never succeed.
+    let addr = spawn_quota_server(0, 3).await;
+    let mut client = connect(addr).await;
+
+    let ops: Vec<BatchOp> = (0..10)
+        .map(|i| BatchOp {
+            op: 1,
+            key: Bytes::from(format!("k{i}").into_bytes()),
+            value: Bytes::from_static(b"v"),
+        })
+        .collect();
+    let err = client
+        .batch(BatchRequest {
+            tenant: "alice".into(),
+            ops,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn no_quota_configured_means_no_enforcement() {
+    let addr = spawn_server().await;
+    let mut client = connect(addr).await;
+    for i in 0..200 {
+        client
+            .put(PutRequest {
+                tenant: "alice".into(),
+                key: Bytes::from(format!("k{i}").into_bytes()),
+                value: Bytes::from(vec![b'x'; 256]),
+                ttl_ms: 0,
+            })
+            .await
+            .expect("an unconfigured node must not enforce a limit nobody set");
+    }
 }
 
 #[tokio::test]
