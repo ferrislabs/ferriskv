@@ -1,0 +1,4 @@
+node_id = "n0"
+listen = "127.0.0.1:7100"
+data_dir = "/tmp/ferriskv-node"
+coord_endpoints = []

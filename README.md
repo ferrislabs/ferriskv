@@ -72,7 +72,7 @@ Lexicographic order is preserved, so a tenant's data is one contiguous range and
 
 ## Current capabilities
 
-The server handles gRPC `get`, `put`, `delete`, streamed `scan`, and `batch`. Tenant isolation is enforced at the keyspace level. Two storage backends are configurable: an in-memory `DashMap` for development, or `fjall` for persistence. The write-ahead log on disk is replayed at boot: a torn tail left by an unclean exit is discarded, records are re-applied in write order, and the segment is rotated once storage confirms the data is durable. Configurable limits on key size, value size, batch size, and scan cap. Per-request TTL is enforced by an index-driven background sweeper. JWT authentication and per-RPC RBAC are enforced on every call. TLS is supported with configurable cert and key paths. A structured audit log records writes. An admin HTTP server exposes `/healthz`, `/readyz`, and Prometheus `/metrics`. Shutdown handles SIGINT and SIGTERM, drains in-flight requests, and flushes the WAL before exiting. The workspace currently has 130 tests covering the codec, the storage backends, the placement structure, the gRPC handlers, the TTL sweeper, and the auth primitives.
+The server handles gRPC `get`, `put`, `delete`, streamed `scan`, and `batch`. Tenant isolation is enforced at the keyspace level. Two storage backends are configurable: an in-memory `DashMap` for development, or `fjall` for persistence. The write-ahead log on disk is replayed at boot: a torn tail left by an unclean exit is discarded, records are re-applied in write order, and the segment is rotated once storage confirms the data is durable. Configurable limits on key size, value size, batch size, and scan cap. Per-request TTL is enforced by an index-driven background sweeper. JWT authentication and per-RPC RBAC are enforced on every call. TLS is supported with configurable cert and key paths. A structured audit log records writes. An admin HTTP server exposes `/healthz`, `/readyz`, and Prometheus `/metrics`. Shutdown handles SIGINT and SIGTERM, drains in-flight requests, and flushes the WAL before exiting. The workspace currently has 145 tests covering the codec, the storage backends, the placement structure, the gRPC handlers, the TTL sweeper, and the auth primitives, plus property tests and five coverage-guided fuzz targets over the byte-parsers.
 
 ## What is not done yet
 
@@ -211,6 +211,21 @@ make build      # cargo build --workspace --all-targets
 ```
 
 CI runs the same on every push and pull request.
+
+### Fuzzing
+
+Every format the node reads from somewhere it does not control — keys and values
+off disk, a WAL segment after a crash, an operator's TOML — has a
+coverage-guided fuzz target. Requires nightly and `cargo-fuzz`:
+
+```sh
+cargo install cargo-fuzz
+make fuzz                          # 60s per target, same as CI on a pull request
+SECONDS_PER_TARGET=600 make fuzz   # same as the nightly workflow
+```
+
+See [`fuzz/README.md`](fuzz/README.md) for what each target covers, how the seed
+corpus is organised, and what to do when one fails.
 
 ## Roadmap
 
