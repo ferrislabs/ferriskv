@@ -56,6 +56,7 @@ async fn spawn_with(limits: Limits, interceptor: AuthInterceptor) -> SocketAddr 
         admin_listen: None,
         ttl_sweep_interval_secs: 0,
         shutdown_timeout_secs: 5,
+        wal_rotate_bytes: 64 * 1024 * 1024,
     };
     let service = Arc::new(NodeService::open(cfg).unwrap());
     let api = GrpcApi::new(service);

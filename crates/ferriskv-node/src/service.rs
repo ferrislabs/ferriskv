@@ -7,7 +7,7 @@ use ferriskv_core::{
 
 use crate::config::{Backend, NodeConfig};
 use crate::ttl::TtlIndex;
-use crate::wal::Wal;
+use crate::wal::{Wal, WalOp, WalRecord};
 
 pub struct NodeService {
     pub config: NodeConfig,
@@ -32,9 +32,31 @@ impl NodeService {
             }
         };
         let storage = Arc::new(backend);
-        let wal = Wal::open(config.data_dir.join("wal.log"))?;
-        let ttl_index = Arc::new(TtlIndex::new());
 
+        let (wal, recovery) = Wal::open(config.data_dir.join("wal.log"))?;
+        if recovery.truncated_bytes > 0 {
+            tracing::warn!(
+                bytes = recovery.truncated_bytes,
+                "discarded a torn WAL tail, the process did not exit cleanly",
+            );
+        }
+        let replayed = replay(&storage, &recovery.records)?;
+        if replayed > 0 {
+            tracing::info!(records = replayed, "replayed WAL records into storage");
+        }
+        // Everything the segment holds is now in storage, so the segment is
+        // redundant — but only once storage has actually made it durable.
+        //
+        // Unlike the same operation on the write path, a failure here is fatal:
+        // at startup nobody is waiting on a write, and a disk that cannot fsync
+        // is better met with a node that refuses to boot than with one that
+        // serves reads it will not be able to keep.
+        if storage.is_durable() {
+            storage.flush()?;
+            wal.rotate()?;
+        }
+
+        let ttl_index = Arc::new(TtlIndex::new());
         let bootstrap = bootstrap_ttl_index(&storage, &ttl_index)?;
         tracing::info!(count = bootstrap, "ttl index bootstrapped");
 
@@ -45,6 +67,36 @@ impl NodeService {
             clock,
             ttl_index,
         })
+    }
+
+    /// Rotates the WAL once the segment grows past `wal_rotate_bytes`.
+    ///
+    /// Without this the log would grow for the whole uptime of the node, since
+    /// nothing else ever shortens it. The fsync it costs is amortised over a
+    /// segment's worth of writes; against a non-durable backend the log is the
+    /// only copy of the data, so rotation is simply not available.
+    ///
+    /// Failures are logged, not propagated. Rotation is housekeeping that runs
+    /// after the caller's write is already in the log, so surfacing its error
+    /// would tell the caller their write failed when it did not. The cost of
+    /// staying quiet is a segment that keeps growing, which the warning names.
+    fn rotate_wal_if_needed(&self) {
+        if !self.storage.is_durable() {
+            return;
+        }
+        let size = self.wal.segment_bytes();
+        if size < self.config.wal_rotate_bytes {
+            return;
+        }
+        if let Err(e) = self.storage.flush().and_then(|()| self.wal.rotate()) {
+            tracing::warn!(
+                error = %e,
+                segment_bytes = size,
+                "WAL rotation failed, the segment will keep growing",
+            );
+            return;
+        }
+        tracing::debug!(previous_bytes = size, "rotated WAL segment");
     }
 
     #[inline]
@@ -59,11 +111,12 @@ impl NodeService {
             None
         };
         let encoded = ValueCodec::encode(value, expires_at);
-        self.wal.append(1, key, &encoded)?;
+        self.wal.append(WalOp::Put, key, &encoded)?;
         self.storage.put(key, encoded)?;
         if let Some(exp) = expires_at {
             self.ttl_index.schedule(Bytes::copy_from_slice(key), exp);
         }
+        self.rotate_wal_if_needed();
         Ok(())
     }
 
@@ -81,8 +134,10 @@ impl NodeService {
     }
 
     pub fn delete(&self, key: &[u8]) -> ferriskv_core::Result<()> {
-        self.wal.append(2, key, &[])?;
-        self.storage.delete(key)
+        self.wal.append(WalOp::Delete, key, &[])?;
+        self.storage.delete(key)?;
+        self.rotate_wal_if_needed();
+        Ok(())
     }
 
     pub fn scan(&self, prefix: &[u8]) -> ferriskv_core::Result<ScanIter> {
@@ -106,6 +161,22 @@ impl NodeService {
             .collect();
         filtered.into_iter()
     }
+}
+
+/// Re-applies the records a segment still holds, in write order.
+///
+/// No checkpoint is needed to make this safe. A segment is only ever rotated
+/// after storage has been fsynced, so what remains is exactly the suffix
+/// storage may be missing — and re-applying a record that did land is a no-op,
+/// since the frame carries the encoded value byte for byte, TTL stamp included.
+fn replay(storage: &StorageBackend, records: &[WalRecord]) -> ferriskv_core::Result<usize> {
+    for record in records {
+        match record.op {
+            WalOp::Put => storage.put(&record.key, record.value.clone())?,
+            WalOp::Delete => storage.delete(&record.key)?,
+        }
+    }
+    Ok(records.len())
 }
 
 fn bootstrap_ttl_index(storage: &StorageBackend, index: &TtlIndex) -> ferriskv_core::Result<usize> {
@@ -148,6 +219,7 @@ mod tests {
             admin_listen: None,
             ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 5,
+            wal_rotate_bytes: 64 * 1024 * 1024,
         }
     }
 
@@ -158,6 +230,39 @@ mod tests {
         svc.put_with_ttl(b"k", b"v", 0).unwrap();
         svc.delete(b"k").unwrap();
         assert!(dir.path().join("wal.log").exists());
+    }
+
+    #[test]
+    fn replay_is_idempotent() {
+        // Replaying the same records twice must land on the same state, which
+        // is what lets recovery run without tracking what storage already has.
+        let storage = StorageBackend::Memory(MemStorage::new());
+        let records = vec![
+            WalRecord {
+                seq: 0,
+                op: WalOp::Put,
+                key: Bytes::from_static(b"a"),
+                value: ValueCodec::encode(b"1", None),
+            },
+            WalRecord {
+                seq: 1,
+                op: WalOp::Put,
+                key: Bytes::from_static(b"b"),
+                value: ValueCodec::encode(b"2", None),
+            },
+            WalRecord {
+                seq: 2,
+                op: WalOp::Delete,
+                key: Bytes::from_static(b"a"),
+                value: Bytes::new(),
+            },
+        ];
+        assert_eq!(replay(&storage, &records).unwrap(), 3);
+        let once: Vec<_> = storage.scan(b"").unwrap().collect();
+        replay(&storage, &records).unwrap();
+        let twice: Vec<_> = storage.scan(b"").unwrap().collect();
+        assert_eq!(once, twice);
+        assert!(storage.get(b"a").unwrap().is_none());
     }
 
     #[test]
@@ -225,6 +330,144 @@ mod tests {
         svc.put_with_ttl(b"k", b"v", 0).unwrap();
         clock.advance(u64::MAX / 2);
         assert_eq!(svc.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
+    }
+
+    #[test]
+    fn a_memory_backend_recovers_its_whole_state_from_the_wal() {
+        // The memory backend keeps nothing across a restart, so whatever the
+        // reopened node can read came from the WAL and nowhere else. That makes
+        // it the sharpest available test of replay.
+        let dir = TempDir::new().unwrap();
+        let clock = Clock::manual(1_000);
+        {
+            let svc =
+                NodeService::open_with_clock(config(&dir, Backend::Memory), clock.clone()).unwrap();
+            svc.put_with_ttl(b"kept", b"v1", 0).unwrap();
+            svc.put_with_ttl(b"overwritten", b"first", 0).unwrap();
+            svc.put_with_ttl(b"overwritten", b"second", 0).unwrap();
+            svc.put_with_ttl(b"removed", b"v", 0).unwrap();
+            svc.delete(b"removed").unwrap();
+            svc.wal.sync().unwrap();
+        }
+
+        let svc = NodeService::open_with_clock(config(&dir, Backend::Memory), clock).unwrap();
+        assert_eq!(svc.get(b"kept").unwrap().as_deref(), Some(&b"v1"[..]));
+        assert_eq!(
+            svc.get(b"overwritten").unwrap().as_deref(),
+            Some(&b"second"[..]),
+            "records are applied in write order, so the last write wins",
+        );
+        assert!(
+            svc.get(b"removed").unwrap().is_none(),
+            "a delete record must be replayed too, not just the puts",
+        );
+    }
+
+    #[test]
+    fn replay_restores_the_ttl_stamp_and_not_a_fresh_one() {
+        // The frame carries the encoded value, expiry included, so a key put
+        // with 500ms of TTL before a restart must still expire at t=1500 —
+        // replay must not restamp it relative to the restart.
+        let dir = TempDir::new().unwrap();
+        let clock = Clock::manual(1_000);
+        {
+            let svc =
+                NodeService::open_with_clock(config(&dir, Backend::Memory), clock.clone()).unwrap();
+            svc.put_with_ttl(b"short", b"v", 500).unwrap();
+            svc.wal.sync().unwrap();
+        }
+        clock.advance(400);
+
+        let svc =
+            NodeService::open_with_clock(config(&dir, Backend::Memory), clock.clone()).unwrap();
+        assert_eq!(svc.ttl_index.next_due_ms(), Some(1_500));
+        assert_eq!(svc.get(b"short").unwrap().as_deref(), Some(&b"v"[..]));
+        clock.advance(200);
+        assert!(svc.get(b"short").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_torn_wal_tail_does_not_stop_the_node_from_starting() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let clock = Clock::manual(0);
+        {
+            let svc =
+                NodeService::open_with_clock(config(&dir, Backend::Memory), clock.clone()).unwrap();
+            svc.put_with_ttl(b"a", b"1", 0).unwrap();
+            svc.wal.sync().unwrap();
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("wal.log"))
+            .unwrap();
+        f.write_all(b"half a frame").unwrap();
+        drop(f);
+
+        let svc = NodeService::open_with_clock(config(&dir, Backend::Memory), clock).unwrap();
+        assert_eq!(svc.get(b"a").unwrap().as_deref(), Some(&b"1"[..]));
+    }
+
+    #[test]
+    fn a_durable_backend_rotates_the_wal_on_startup() {
+        let dir = TempDir::new().unwrap();
+        let clock = Clock::manual(0);
+        {
+            let svc =
+                NodeService::open_with_clock(config(&dir, Backend::Fjall), clock.clone()).unwrap();
+            svc.put_with_ttl(b"a", b"1", 0).unwrap();
+            svc.put_with_ttl(b"b", b"2", 0).unwrap();
+            svc.wal.sync().unwrap();
+            assert!(svc.wal.segment_bytes() > crate::wal::HEADER_LEN as u64);
+        }
+        let svc = NodeService::open_with_clock(config(&dir, Backend::Fjall), clock).unwrap();
+        assert_eq!(
+            svc.wal.segment_bytes(),
+            crate::wal::HEADER_LEN as u64,
+            "fjall already holds the data, so the segment must be dropped",
+        );
+        assert_eq!(svc.get(b"a").unwrap().as_deref(), Some(&b"1"[..]));
+        assert_eq!(svc.get(b"b").unwrap().as_deref(), Some(&b"2"[..]));
+        assert!(
+            svc.wal.next_seq() >= 2,
+            "sequences must survive the rotation",
+        );
+    }
+
+    #[test]
+    fn a_memory_backend_never_rotates_because_the_wal_is_the_only_copy() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = config(&dir, Backend::Memory);
+        cfg.wal_rotate_bytes = 4096;
+        let svc = NodeService::open_with_clock(cfg, Clock::manual(0)).unwrap();
+        for i in 0..200u32 {
+            svc.put_with_ttl(format!("k{i}").as_bytes(), &[b'x'; 64], 0)
+                .unwrap();
+        }
+        assert!(
+            svc.wal.segment_bytes() > 4096,
+            "rotation would destroy the only copy of the data",
+        );
+    }
+
+    #[test]
+    fn rotation_keeps_the_data_readable_and_bounds_the_segment() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = config(&dir, Backend::Fjall);
+        cfg.wal_rotate_bytes = 4096;
+        let svc = NodeService::open_with_clock(cfg, Clock::manual(0)).unwrap();
+        for i in 0..200u32 {
+            svc.put_with_ttl(format!("k{i}").as_bytes(), &[b'x'; 64], 0)
+                .unwrap();
+        }
+        assert!(
+            svc.wal.segment_bytes() <= 4096 + 256,
+            "segment grew to {} bytes despite a 4096 threshold",
+            svc.wal.segment_bytes(),
+        );
+        assert_eq!(svc.get(b"k0").unwrap().as_deref(), Some(&[b'x'; 64][..]));
+        assert_eq!(svc.get(b"k199").unwrap().as_deref(), Some(&[b'x'; 64][..]));
     }
 
     #[test]

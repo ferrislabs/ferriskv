@@ -89,6 +89,7 @@ async fn main() -> Result<()> {
             admin_listen: None,
             ttl_sweep_interval_secs: 60,
             shutdown_timeout_secs: 10,
+            wal_rotate_bytes: 64 * 1024 * 1024,
         }
     };
 
