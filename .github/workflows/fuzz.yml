@@ -1,0 +1,83 @@
+name: fuzz
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # 03:17 UTC daily. Off the hour so the run does not queue behind everyone
+    # else's midnight cron.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds_per_target:
+        description: Budget per fuzz target, in seconds
+        required: false
+        default: "600"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: short
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    # A pull request gets a smoke test; the nightly run gets a real budget.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 20 || 90 }}
+    strategy:
+      # One target finding a crash must not cancel the others: knowing whether
+      # a bug is in one parser or in all of them is most of the triage.
+      fail-fast: false
+      matrix:
+        target:
+          - key_decode
+          - key_roundtrip
+          - value_decode
+          - wal_frame
+          - node_config
+    steps:
+      - uses: actions/checkout@v6
+
+      # cargo-fuzz needs nightly for the sanitizer flags libFuzzer relies on.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz
+          cache-on-failure: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Pick the budget for this event
+        id: budget
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request) echo "seconds=60" >> "$GITHUB_OUTPUT" ;;
+            workflow_dispatch) echo "seconds=${{ inputs.seconds_per_target }}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "seconds=600" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # libFuzzer only writes new inputs to the first corpus directory, so the
+      # committed seeds stay read-only and cannot be churned by a CI run.
+      - name: Seed the corpus
+        run: mkdir -p fuzz/corpus/${{ matrix.target }}
+
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          cargo fuzz run ${{ matrix.target }} \
+            fuzz/corpus/${{ matrix.target }} \
+            fuzz/seeds/${{ matrix.target }} \
+            -- -max_total_time=${{ steps.budget.outputs.seconds }} \
+               -print_final_stats=1
+
+      # The crashing input is the whole value of a failed run: without it the
+      # only output is "something panicked" and nobody can reproduce it.
+      - name: Upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

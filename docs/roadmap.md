@@ -44,7 +44,7 @@ By the end of P4, FerrisKV is reachable from outside the Rust ecosystem and oper
 
 ## P5: Maturity
 
-Property tests with `madsim` exercise the distributed layer under injected partitions, restarts, and clock skew. Fuzz targets cover the codecs, the WAL parser, and the config loader. Benchmarks with `criterion` and `goose` track regressions over time. A documentation site collects everything that today lives in `docs/`.
+Property tests with `madsim` exercise the distributed layer under injected partitions, restarts, and clock skew. Fuzz targets already cover the codecs, the WAL parser, and the config loader; what remains here is the Avro schema parser, which lands with schema validation itself. Benchmarks with `criterion` and `goose` track regressions over time. A documentation site collects everything that today lives in `docs/`.
 
 P5 is continuous; it overlaps with the other phases as soon as there is something to test.
 
