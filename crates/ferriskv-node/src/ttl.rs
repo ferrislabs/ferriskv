@@ -178,7 +178,9 @@ pub fn sweep_once(service: &NodeService) -> usize {
                 // are told. A watcher whose keys vanish without an event would
                 // hold a view of the keyspace that silently diverges.
                 Ok(true) => match service.delete(key) {
-                    Ok(()) => removed += 1,
+                    // The sweeper already knows the key was there — it just read
+                    // it — so the returned flag adds nothing here.
+                    Ok(_) => removed += 1,
                     Err(e) => tracing::warn!(error = %e, "ttl sweeper: delete failed"),
                 },
                 Ok(false) => {

@@ -424,8 +424,12 @@ impl GrpcApi {
         let r = req.into_inner();
         self.enforce_key_size(&r.key)?;
         let k = encode_data_key(&r.tenant, &r.key)?;
-        let found = self.inner.get(&k).map_err(to_status)?.is_some();
-        self.inner.delete(&k).map_err(to_status)?;
+        // `found` comes from the delete itself rather than from a separate read
+        // before it. It is still best-effort — see `NodeService::delete` and the
+        // note on `DeleteRequest` in the proto — but one read means one point in
+        // time, so the flag and the removal can no longer describe different
+        // states of the key.
+        let found = self.inner.delete(&k).map_err(to_status)?;
         audit::write(&principal, &r.tenant, "delete", &r.key, 0);
         Ok(Response::new(DeleteResponse { found }))
     }
@@ -550,7 +554,9 @@ impl GrpcApi {
                     "put"
                 }
                 OP_DELETE => {
-                    self.inner.delete(&k).map_err(to_status)?;
+                    // BatchResponse carries no per-op result, so the flag has
+                    // nowhere to go.
+                    let _ = self.inner.delete(&k).map_err(to_status)?;
                     "delete"
                 }
                 other => return Err(Status::invalid_argument(format!("unknown op code {other}"))),
