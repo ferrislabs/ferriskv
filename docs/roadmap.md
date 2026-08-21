@@ -32,7 +32,7 @@ By the end of P2, transactions across keys, across shards, and across tenants ar
 
 ## P3: Multi-tenant database features
 
-Higher-level capabilities. Watches let clients subscribe to changes on a prefix — done for a single node, streaming puts, deletes and TTL evictions off a per-tenant broadcast channel; what remains is a version to resume from, which waits on MVCC. Per-tenant quotas track storage and operation rate, with throttling for noisy neighbours. Optional Avro schemas validate writes against a typed contract. Secondary indexes turn the KV into something you can query on non-primary fields. Encryption at rest uses a derived key per tenant.
+Higher-level capabilities. Watches let clients subscribe to changes on a prefix — done for a single node, streaming puts, deletes and TTL evictions off a per-tenant broadcast channel; what remains is a version to resume from, which waits on MVCC. Per-tenant quotas track storage and operation rate, with throttling for noisy neighbours — done for a single node; what remains is aggregating usage across shards once data is replicated. Optional Avro schemas validate writes against a typed contract. Secondary indexes turn the KV into something you can query on non-primary fields. Encryption at rest uses a derived key per tenant.
 
 By the end of P3, FerrisKV is no longer just a KV store; it is a database with isolation, optional schemas, and queryable indexes.
 

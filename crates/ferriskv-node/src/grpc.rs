@@ -97,9 +97,17 @@ fn to_status(e: Error) -> Status {
         Error::NotLeader { .. } => Status::failed_precondition(e.to_string()),
         Error::UnknownTenant(_) => Status::unauthenticated(e.to_string()),
         Error::NotOwner(_) => Status::failed_precondition(e.to_string()),
-        Error::Corrupt(_) | Error::Storage(_) | Error::Io(_) | Error::Config(_) => {
-            Status::internal(e.to_string())
+        // Both are the client's problem and both are retryable, which is what
+        // ResourceExhausted means — unlike the size limits above, waiting or
+        // deleting actually helps here.
+        Error::QuotaExceeded { .. } | Error::RateLimited { .. } => {
+            Status::resource_exhausted(e.to_string())
         }
+        // A request whose cost exceeds the tenant's entire per-second allowance
+        // arrives here: no wait admits it, so calling it a rate limit would send
+        // the client into a retry loop that can never succeed.
+        Error::Config(_) => Status::invalid_argument(e.to_string()),
+        Error::Corrupt(_) | Error::Storage(_) | Error::Io(_) => Status::internal(e.to_string()),
     }
 }
 
@@ -344,9 +352,20 @@ fn watch_stream(state: WatchState) -> impl Stream<Item = Result<WatchEvent, Stat
 }
 
 impl GrpcApi {
+    /// Charges `cost` operations to the tenant's rate limit.
+    ///
+    /// Called after authorization and before any storage access: an unauthorized
+    /// caller must not be able to spend a tenant's allowance, and an admitted
+    /// one must not be able to do work it will then be refused for.
+    #[inline]
+    fn admit(&self, tenant: &str, cost: u32) -> Result<(), Status> {
+        self.inner.admit(tenant, cost).map_err(to_status)
+    }
+
     async fn get_impl(&self, req: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_READ)?;
+        self.admit(&req.get_ref().tenant, 1)?;
         let r = req.into_inner();
         self.enforce_key_size(&r.key)?;
         let k = encode_data_key(&r.tenant, &r.key)?;
@@ -371,6 +390,7 @@ impl GrpcApi {
     async fn put_impl(&self, req: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_WRITE)?;
+        self.admit(&req.get_ref().tenant, 1)?;
         let principal = req
             .extensions()
             .get::<Principal>()
@@ -395,6 +415,7 @@ impl GrpcApi {
     ) -> Result<Response<DeleteResponse>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_DELETE)?;
+        self.admit(&req.get_ref().tenant, 1)?;
         let principal = req
             .extensions()
             .get::<Principal>()
@@ -415,6 +436,7 @@ impl GrpcApi {
     ) -> Result<Response<<Self as FerrisKv>::ScanStream>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_READ)?;
+        self.admit(&req.get_ref().tenant, 1)?;
         let r = req.into_inner();
         let bounds = encode_data_scan_bounds(&r.tenant, &r.prefix)?;
 
@@ -461,6 +483,7 @@ impl GrpcApi {
     ) -> Result<Response<<Self as FerrisKv>::WatchStream>, Status> {
         check_tenant(&req.get_ref().tenant)?;
         authorize(&req, &req.get_ref().tenant, PERM_WATCH)?;
+        self.admit(&req.get_ref().tenant, 1)?;
         let r = req.into_inner();
         self.enforce_key_size(&r.prefix)?;
 
@@ -504,6 +527,12 @@ impl GrpcApi {
             .unwrap_or(Principal::Anonymous);
         let r = req.into_inner();
         self.enforce_batch_size(r.ops.len())?;
+        // The cost is the number of operations, not one for the RPC. Charging
+        // per call would let a client bypass its rate limit entirely by
+        // batching, which is the one loophole a limit on a batching API cannot
+        // have. Charged after the size check so an oversized batch is refused
+        // for its size rather than for its cost.
+        self.admit(&r.tenant, u32::try_from(r.ops.len()).unwrap_or(u32::MAX))?;
         for op in r.ops {
             self.enforce_key_size(&op.key)?;
             if op.op == OP_PUT {

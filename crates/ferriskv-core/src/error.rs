@@ -29,4 +29,14 @@ pub enum Error {
 
     #[error("configuration: {0}")]
     Config(String),
+
+    #[error("tenant {tenant} would use {used} bytes, over its {limit} byte quota")]
+    QuotaExceeded {
+        tenant: Arc<str>,
+        used: u64,
+        limit: u64,
+    },
+
+    #[error("tenant {tenant} exceeded its rate limit of {limit} operations per second")]
+    RateLimited { tenant: Arc<str>, limit: u32 },
 }
