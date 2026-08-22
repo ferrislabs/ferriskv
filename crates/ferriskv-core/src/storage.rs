@@ -2,7 +2,7 @@ use std::path::Path;
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
+use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle, PersistMode};
 
 use crate::error::{Error, Result};
 
@@ -14,6 +14,12 @@ pub trait Storage: Send + Sync {
     fn delete(&self, key: &[u8]) -> Result<()>;
     fn scan(&self, prefix: &[u8]) -> Result<ScanIter>;
     fn scan_range(&self, start: &[u8], end: &[u8]) -> Result<ScanIter>;
+
+    /// Makes every write issued so far durable.
+    ///
+    /// Callers that intend to discard their own write-ahead record must fence
+    /// on this first: once the record is gone, this backend is the only copy.
+    fn flush(&self) -> Result<()>;
 }
 
 #[derive(Default)]
@@ -68,10 +74,17 @@ impl Storage for MemStorage {
         out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         Ok(out.into_iter())
     }
+
+    /// Nothing to do: this backend never survives the process, which is why
+    /// [`StorageBackend::is_durable`] answers `false` for it.
+    #[inline]
+    fn flush(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct FjallStorage {
-    _keyspace: Keyspace,
+    keyspace: Keyspace,
     partition: PartitionHandle,
 }
 
@@ -83,7 +96,7 @@ impl FjallStorage {
         let partition =
             keyspace.open_partition(partition_name, PartitionCreateOptions::default())?;
         Ok(Self {
-            _keyspace: keyspace,
+            keyspace,
             partition,
         })
     }
@@ -126,6 +139,11 @@ impl Storage for FjallStorage {
             out.push((Bytes::copy_from_slice(&k), Bytes::copy_from_slice(&v)));
         }
         Ok(out.into_iter())
+    }
+
+    fn flush(&self) -> Result<()> {
+        self.keyspace.persist(PersistMode::SyncAll)?;
+        Ok(())
     }
 }
 
@@ -172,9 +190,29 @@ impl Storage for StorageBackend {
             Self::Fjall(s) => s.scan_range(start, end),
         }
     }
+
+    fn flush(&self) -> Result<()> {
+        match self {
+            Self::Memory(s) => s.flush(),
+            Self::Fjall(s) => s.flush(),
+        }
+    }
 }
 
 impl StorageBackend {
+    /// Whether the data written here is still there after a restart.
+    ///
+    /// This is what tells a write-ahead log whether it is allowed to forget a
+    /// record it has already applied: against a non-durable backend the log is
+    /// the only copy of the data, so it must keep everything.
+    #[inline]
+    pub fn is_durable(&self) -> bool {
+        match self {
+            Self::Memory(_) => false,
+            Self::Fjall(_) => true,
+        }
+    }
+
     pub fn require_key(&self, key: &[u8]) -> Result<Bytes> {
         match self.get(key)? {
             Some(v) => Ok(v),
@@ -227,6 +265,34 @@ mod tests {
             backend.require_key(b"missing"),
             Err(Error::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn memory_is_not_durable_and_fjall_is() {
+        assert!(!StorageBackend::Memory(MemStorage::new()).is_durable());
+        let dir = tempfile::TempDir::new().unwrap();
+        let fjall = FjallStorage::open(dir.path(), "test").unwrap();
+        assert!(StorageBackend::Fjall(fjall).is_durable());
+    }
+
+    #[test]
+    fn flush_is_a_noop_on_memory() {
+        let s = MemStorage::new();
+        s.put(b"k", Bytes::from_static(b"v")).unwrap();
+        assert!(s.flush().is_ok());
+        assert_eq!(s.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
+    }
+
+    #[test]
+    fn fjall_flush_survives_reopen() {
+        let dir = tempfile::TempDir::new().unwrap();
+        {
+            let s = FjallStorage::open(dir.path(), "test").unwrap();
+            s.put(b"k", Bytes::from_static(b"v")).unwrap();
+            s.flush().unwrap();
+        }
+        let s = FjallStorage::open(dir.path(), "test").unwrap();
+        assert_eq!(s.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
     }
 
     #[test]

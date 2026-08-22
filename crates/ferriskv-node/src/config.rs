@@ -87,6 +87,13 @@ pub struct NodeConfig {
     pub ttl_sweep_interval_secs: u64,
     #[serde(default = "default_shutdown_secs")]
     pub shutdown_timeout_secs: u64,
+    /// Size at which the WAL segment is rotated, in bytes.
+    ///
+    /// Rotation drops records that storage already holds, so it is what keeps
+    /// the log from growing for the whole uptime of the node. It costs one
+    /// storage fsync, hence a threshold rather than a per-write check.
+    #[serde(default = "default_wal_rotate_bytes")]
+    pub wal_rotate_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -108,6 +115,10 @@ fn default_ttl_sweep_interval_secs() -> u64 {
     60
 }
 
+fn default_wal_rotate_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
 impl NodeConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.node_id.is_empty() {
@@ -123,6 +134,11 @@ impl NodeConfig {
         }
         if self.shutdown_timeout_secs == 0 {
             return Err("shutdown_timeout_secs must be > 0".into());
+        }
+        // A threshold below one frame would rotate on every write, turning
+        // every put into a storage fsync.
+        if self.wal_rotate_bytes < 4096 {
+            return Err("wal_rotate_bytes must be at least 4096".into());
         }
         if let Some(parent) = self.data_dir.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -166,6 +182,7 @@ mod tests {
             admin_listen: None,
             ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 10,
+            wal_rotate_bytes: default_wal_rotate_bytes(),
         }
     }
 
@@ -183,8 +200,30 @@ mod tests {
         assert_eq!(cfg.backend, Backend::Fjall);
         assert_eq!(cfg.limits.max_value_size, 10 * 1024 * 1024);
         assert_eq!(cfg.shutdown_timeout_secs, 10);
+        assert_eq!(cfg.wal_rotate_bytes, 64 * 1024 * 1024);
         assert!(!cfg.auth.insecure);
         assert!(cfg.tls.is_none());
+    }
+
+    #[test]
+    fn parses_wal_rotate_bytes() {
+        let cfg = parse(
+            r#"
+            node_id = "n0"
+            listen = "127.0.0.1:7100"
+            data_dir = "/tmp/ferriskv-node"
+            coord_endpoints = []
+            wal_rotate_bytes = 8388608
+        "#,
+        );
+        assert_eq!(cfg.wal_rotate_bytes, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn validate_rejects_a_rotation_threshold_that_would_fsync_every_write() {
+        let mut c = base_cfg();
+        c.wal_rotate_bytes = 512;
+        assert!(c.validate().is_err());
     }
 
     #[test]

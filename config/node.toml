@@ -5,6 +5,9 @@ data_dir = "./data/node"
 coord_endpoints = []
 backend = "fjall"
 shutdown_timeout_secs = 3600
+# Rotate the WAL segment past this size. Rotation costs one storage fsync,
+# and is what keeps the log from growing for the whole uptime of the node.
+wal_rotate_bytes = 67108864
 
 [auth]
 insecure = true

@@ -49,3 +49,6 @@ website/**/npm-debug.log*
 website/**/yarn-debug.log*
 website/**/yarn-error.log*
 website/**/pnpm-debug.log*
+
+# Per-machine Claude Code settings (the methodology preferences are committed)
+/.claude/settings.local.json

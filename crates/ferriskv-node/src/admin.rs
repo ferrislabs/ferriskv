@@ -144,6 +144,7 @@ mod tests {
             admin_listen: None,
             ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 5,
+            wal_rotate_bytes: 64 * 1024 * 1024,
         };
         (Arc::new(NodeService::open(cfg).unwrap()), dir)
     }
