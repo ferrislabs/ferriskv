@@ -90,20 +90,51 @@ fn value_decode_with_ttl(bencher: Bencher) {
     bencher.bench(|| ValueCodec::decode(black_box(encoded.clone())).unwrap());
 }
 
-/// The size-free path quota accounting takes on every write.
+/// Calls per batch for the header-only paths below.
+///
+/// A single call to either is a load and a compare — roughly two cycles, which
+/// no harness can resolve. Measured one at a time they report the cost of being
+/// measured: about 0.5 ns of real work behind a figure two to three orders of
+/// magnitude larger, swinging 29% between runs of identical code. Batching puts
+/// the function back in charge of the number.
+///
+/// These report per batch, not per call. Divide by this to compare against the
+/// single-call benchmarks above.
+const HOT_BATCH: usize = 64;
+
+fn hot_batch(ttl: Option<u64>) -> Vec<Bytes> {
+    (0..HOT_BATCH)
+        .map(|i| ValueCodec::encode(&[0xABu8; 32], ttl.map(|t| t + i as u64)))
+        .collect()
+}
+
+/// The header-only path quota accounting takes on every write.
 ///
 /// Reads the header and returns a length, so it is the counterpart to
 /// `value_decode_*`: same header parse, no `StoredValue` built.
 #[divan::bench]
 fn value_payload_len_hot(bencher: Bencher) {
-    let encoded = ValueCodec::encode(&[0xABu8; 256], Some(1_700_000_000_000));
-    bencher.bench(|| ValueCodec::payload_len(black_box(&encoded)).unwrap());
+    let batch = hot_batch(Some(1_700_000_000_000));
+    bencher.bench(|| {
+        let mut total = 0usize;
+        for encoded in &batch {
+            total += ValueCodec::payload_len(black_box(encoded)).unwrap();
+        }
+        total
+    });
 }
 
+/// The header-only path every read takes to decide whether a key is still live.
 #[divan::bench]
 fn value_is_expired_hot(bencher: Bencher) {
-    let encoded = ValueCodec::encode(b"value", Some(1_700_000_000_000));
+    let batch = hot_batch(Some(1_700_000_000_000));
     bencher.bench(|| {
-        ValueCodec::is_expired(black_box(&encoded), black_box(1_600_000_000_000)).unwrap()
+        let mut live = 0usize;
+        for encoded in &batch {
+            if !ValueCodec::is_expired(black_box(encoded), black_box(1_600_000_000_000)).unwrap() {
+                live += 1;
+            }
+        }
+        live
     });
 }
