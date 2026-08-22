@@ -98,8 +98,10 @@ fn value_decode_with_ttl(bencher: Bencher) {
 /// magnitude larger, swinging 29% between runs of identical code. Batching puts
 /// the function back in charge of the number.
 ///
-/// These report per batch, not per call. Divide by this to compare against the
-/// single-call benchmarks above.
+/// These report per batch, not per call — hence the `_batch` suffix on their
+/// names. Keeping the old `_hot` names would have made the regression check
+/// compare a batch against a single call and read the 64x more work as a 95%
+/// regression, which is exactly what it did before they were renamed.
 const HOT_BATCH: usize = 64;
 
 fn hot_batch(ttl: Option<u64>) -> Vec<Bytes> {
@@ -113,7 +115,7 @@ fn hot_batch(ttl: Option<u64>) -> Vec<Bytes> {
 /// Reads the header and returns a length, so it is the counterpart to
 /// `value_decode_*`: same header parse, no `StoredValue` built.
 #[divan::bench]
-fn value_payload_len_hot(bencher: Bencher) {
+fn value_payload_len_batch(bencher: Bencher) {
     let batch = hot_batch(Some(1_700_000_000_000));
     bencher.bench(|| {
         let mut total = 0usize;
@@ -126,7 +128,7 @@ fn value_payload_len_hot(bencher: Bencher) {
 
 /// The header-only path every read takes to decide whether a key is still live.
 #[divan::bench]
-fn value_is_expired_hot(bencher: Bencher) {
+fn value_is_expired_batch(bencher: Bencher) {
     let batch = hot_batch(Some(1_700_000_000_000));
     bencher.bench(|| {
         let mut live = 0usize;
