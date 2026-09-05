@@ -16,8 +16,20 @@ watch_buffer = 1024
 # keyspace from a dead connection.
 watch_heartbeat_secs = 30
 
+# Three modes, mutually exclusive.
+#   insecure = true        every caller is trusted; development only
+#   public_key_path = ...  one RS256 public key, read once at startup
+#   jwks_url = ...         keys fetched from an IAM and refreshed as it rotates
 [auth]
 insecure = true
+# jwks_url = "https://idp.example/realms/ferriskv/protocol/openid-connect/certs"
+# How long the node may go without re-reading the key set. A rotation is also
+# picked up on demand, the first time a token names a key the node does not have.
+# jwks_refresh_secs = 3600
+# Permits a plaintext JWKS endpoint outside loopback. Off by default: whoever
+# answers that URL decides which signatures the node accepts. Turn it on only
+# where a sidecar terminates TLS.
+# jwks_allow_plaintext = false
 
 # Node-wide quota defaults, applied to any tenant without a record of its own.
 # 0 means unlimited on both fields, which is the default: a node should not

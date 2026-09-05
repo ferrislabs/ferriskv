@@ -23,6 +23,7 @@ dashmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 config = { workspace = true }
+reqwest = { workspace = true }
 governor = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

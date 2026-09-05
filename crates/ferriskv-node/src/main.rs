@@ -8,11 +8,12 @@ use ferriskv_auth::JwtVerifier;
 use ferriskv_core::Limits;
 use ferriskv_node::{
     admin,
-    config::{AuthConfig, Backend, TlsConfig},
-    ttl, AuthInterceptor, GrpcApi, NodeConfig, NodeService,
+    config::{AuthConfig, AuthMode, Backend, TlsConfig},
+    jwks, ttl, AuthInterceptor, GrpcApi, JwksSource, NodeConfig, NodeService,
 };
 use ferriskv_proto::ferris_kv_server::FerrisKvServer;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use tokio::task::JoinHandle;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -101,6 +102,7 @@ async fn main() -> Result<()> {
     let metrics_handle = install_metrics_recorder()?;
 
     let service = Arc::new(NodeService::open(cfg)?);
+    let (interceptor, jwks_handle) = build_auth_interceptor(&service.config.auth).await?;
     let addr = service.config.listen;
     let shutdown_timeout = Duration::from_secs(service.config.shutdown_timeout_secs);
     info!(
@@ -141,7 +143,6 @@ async fn main() -> Result<()> {
         None
     };
 
-    let interceptor = build_auth_interceptor(&service.config.auth)?;
     let api = GrpcApi::new(Arc::clone(&service));
     let mut builder = Server::builder()
         .tcp_keepalive(Some(Duration::from_secs(30)))
@@ -174,6 +175,12 @@ async fn main() -> Result<()> {
 
     if let Err(e) = ttl_handle.await {
         error!(error = ?e, "ttl sweeper task ended unexpectedly");
+    }
+
+    if let Some(handle) = jwks_handle {
+        if let Err(e) = handle.await {
+            error!(error = ?e, "JWKS refresher task ended unexpectedly");
+        }
     }
 
     if let Err(e) = service.wal.sync() {
@@ -255,18 +262,49 @@ fn build_tls(cfg: &TlsConfig) -> Result<ServerTlsConfig> {
     Ok(ServerTlsConfig::new().identity(identity))
 }
 
-fn build_auth_interceptor(cfg: &AuthConfig) -> Result<AuthInterceptor> {
-    if cfg.insecure {
-        warn!("auth disabled (insecure=true); the server trusts every caller");
-        return Ok(AuthInterceptor::insecure());
+/// Builds the interceptor, plus the task keeping its keys current when they
+/// come from an IAM.
+///
+/// Runs before anything else is spawned: an auth source that cannot be reached
+/// is a reason not to start, and finding that out after the admin server is up
+/// makes the node look briefly healthy while it is not.
+async fn build_auth_interceptor(
+    cfg: &AuthConfig,
+) -> Result<(AuthInterceptor, Option<JoinHandle<()>>)> {
+    match cfg.mode() {
+        AuthMode::Insecure => {
+            warn!("auth disabled (insecure=true); the server trusts every caller");
+            Ok((AuthInterceptor::insecure(), None))
+        }
+        AuthMode::StaticKey(path) => {
+            let pem = cfg
+                .load_public_key()
+                .map_err(anyhow::Error::msg)?
+                .ok_or_else(|| anyhow!("auth: public_key_path required when not insecure"))?;
+            let verifier = Arc::new(JwtVerifier::new_rs256(&pem)?);
+            info!(key = %path.display(), "auth enabled (JWT RS256, public key from disk)");
+            Ok((AuthInterceptor::with_verifier(verifier), None))
+        }
+        AuthMode::Jwks { url, refresh } => {
+            let source = JwksSource::new(url)?;
+            let keys = jwks::load_at_startup(&source).await?;
+            let stale = jwks::notify_on_stale(&keys);
+            let verifier = Arc::new(JwtVerifier::new_jwks(Arc::clone(&keys)));
+            let refresher = tokio::spawn(jwks::run_refresher(
+                source,
+                keys,
+                stale,
+                jwks::RefreshPolicy::every(refresh),
+                shutdown_signal(),
+            ));
+            info!(
+                url,
+                refresh_secs = refresh.as_secs(),
+                "auth enabled (JWT via JWKS)",
+            );
+            Ok((AuthInterceptor::with_verifier(verifier), Some(refresher)))
+        }
     }
-    let pem = cfg
-        .load_public_key()
-        .map_err(anyhow::Error::msg)?
-        .ok_or_else(|| anyhow!("auth: public_key_path required when not insecure"))?;
-    let verifier = Arc::new(JwtVerifier::new_rs256(&pem)?);
-    info!("auth enabled (JWT RS256, public key from disk)");
-    Ok(AuthInterceptor::with_verifier(verifier))
 }
 
 async fn shutdown_signal() {

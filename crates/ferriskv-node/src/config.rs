@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use ferriskv_core::Limits;
 use serde::{Deserialize, Serialize};
@@ -37,22 +38,141 @@ impl TlsConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Where the node gets the keys it verifies tokens with.
+///
+/// The TOML surface is three optional settings, which can express combinations
+/// that mean nothing. `AuthConfig::mode` collapses a validated config into this
+/// closed set, so the startup path matches on one value instead of re-deriving
+/// which fields were present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthMode<'a> {
+    /// Every caller is trusted. Development only.
+    Insecure,
+    /// One RS256 public key, read from disk at startup.
+    StaticKey(&'a Path),
+    /// Many keys, fetched from an IAM and refreshed as it rotates them.
+    Jwks { url: &'a str, refresh: Duration },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     #[serde(default)]
     pub insecure: bool,
+    #[serde(default)]
     pub public_key_path: Option<PathBuf>,
+    /// JWKS endpoint of the IAM, e.g. `https://idp.example/.well-known/jwks.json`.
+    #[serde(default)]
+    pub jwks_url: Option<String>,
+    #[serde(default = "default_jwks_refresh_secs")]
+    pub jwks_refresh_secs: u64,
+    /// Permits a `http://` JWKS endpoint outside loopback.
+    ///
+    /// Off by default, because whoever answers that request decides which
+    /// signatures the node accepts: on plaintext, anyone on the path can serve
+    /// their own key and mint tokens for any tenant. The escape hatch exists
+    /// for meshes that terminate TLS at the sidecar, where the plaintext hop is
+    /// the loopback interface in all but name.
+    #[serde(default)]
+    pub jwks_allow_plaintext: bool,
 }
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            insecure: false,
+            public_key_path: None,
+            jwks_url: None,
+            jwks_refresh_secs: default_jwks_refresh_secs(),
+            jwks_allow_plaintext: false,
+        }
+    }
+}
+
+/// One hour: long enough to be invisible next to an IAM's rotation period,
+/// short enough that an unnoticed rotation heals on its own. A key retired
+/// early is picked up sooner than this anyway, on the first token that names it.
+fn default_jwks_refresh_secs() -> u64 {
+    3600
+}
+
+/// Floor on the refresh interval, so a typo cannot turn the node into a
+/// polling load on the IAM.
+const MIN_JWKS_REFRESH_SECS: u64 = 30;
 
 impl AuthConfig {
     pub fn validate(&self) -> Result<(), String> {
+        let configured = self.public_key_path.is_some() || self.jwks_url.is_some();
+
         if self.insecure {
+            if configured {
+                return Err(
+                    "auth: insecure=true ignores public_key_path and jwks_url; remove one or the other"
+                        .into(),
+                );
+            }
             return Ok(());
         }
-        if self.public_key_path.is_none() {
-            return Err("auth: set insecure=true or provide public_key_path".into());
+
+        match (&self.public_key_path, &self.jwks_url) {
+            (None, None) => {
+                return Err(
+                    "auth: set insecure=true, or provide public_key_path or jwks_url".into(),
+                )
+            }
+            (Some(_), Some(_)) => {
+                return Err("auth: public_key_path and jwks_url are mutually exclusive".into())
+            }
+            (Some(_), None) => return Ok(()),
+            (None, Some(url)) => self.validate_jwks(url)?,
         }
+
         Ok(())
+    }
+
+    fn validate_jwks(&self, url: &str) -> Result<(), String> {
+        if self.jwks_refresh_secs < MIN_JWKS_REFRESH_SECS {
+            return Err(format!(
+                "auth: jwks_refresh_secs must be at least {MIN_JWKS_REFRESH_SECS}"
+            ));
+        }
+
+        if url.starts_with("https://") {
+            return Ok(());
+        }
+
+        let Some(rest) = url.strip_prefix("http://") else {
+            return Err("auth: jwks_url must be an http:// or https:// URL".into());
+        };
+
+        if self.jwks_allow_plaintext || is_loopback_authority(rest) {
+            return Ok(());
+        }
+
+        Err(format!(
+            "auth: refusing a plaintext JWKS endpoint outside loopback ({url}); \
+             use https, or set jwks_allow_plaintext=true if TLS terminates at a sidecar"
+        ))
+    }
+
+    /// Resolves a validated config into the mode the node will run in.
+    ///
+    /// Returns `Insecure` for a config that never passed `validate`, which is
+    /// why callers must validate first — a fact the startup path honours by
+    /// validating the whole `NodeConfig` before touching auth.
+    pub fn mode(&self) -> AuthMode<'_> {
+        if self.insecure {
+            return AuthMode::Insecure;
+        }
+        if let Some(url) = &self.jwks_url {
+            return AuthMode::Jwks {
+                url,
+                refresh: Duration::from_secs(self.jwks_refresh_secs),
+            };
+        }
+        match &self.public_key_path {
+            Some(path) => AuthMode::StaticKey(path),
+            None => AuthMode::Insecure,
+        }
     }
 
     pub fn load_public_key(&self) -> Result<Option<Vec<u8>>, String> {
@@ -65,6 +185,31 @@ impl AuthConfig {
             None => Ok(None),
         }
     }
+}
+
+/// Whether the authority of a URL points back at this host.
+///
+/// Deliberately textual: the alternative is resolving the name, which would let
+/// whoever controls DNS decide whether the plaintext check applies.
+fn is_loopback_authority(rest: &str) -> bool {
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+
+    let host = match authority.strip_prefix('[') {
+        // IPv6 literal: everything up to the closing bracket.
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Node-wide quota defaults, applied to any tenant without a record of its own.
@@ -359,10 +504,128 @@ mod tests {
     fn auth_validate_accepts_public_key_path() {
         let mut c = base_cfg();
         c.auth = AuthConfig {
-            insecure: false,
             public_key_path: Some(PathBuf::from("/etc/ferriskv/idp.pub")),
+            ..Default::default()
         };
         assert!(c.validate().is_ok());
+        assert_eq!(
+            c.auth.mode(),
+            AuthMode::StaticKey(Path::new("/etc/ferriskv/idp.pub"))
+        );
+    }
+
+    fn jwks_auth(url: &str) -> AuthConfig {
+        AuthConfig {
+            jwks_url: Some(url.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn parses_the_jwks_settings() {
+        let cfg = parse(
+            r#"
+            node_id = "n0"
+            listen = "127.0.0.1:7100"
+            data_dir = "/tmp/ferriskv-node"
+            coord_endpoints = []
+
+            [auth]
+            jwks_url = "https://idp.example/.well-known/jwks.json"
+            jwks_refresh_secs = 900
+        "#,
+        );
+        assert_eq!(
+            cfg.auth.jwks_url.as_deref(),
+            Some("https://idp.example/.well-known/jwks.json")
+        );
+        assert_eq!(cfg.auth.jwks_refresh_secs, 900);
+        assert!(!cfg.auth.jwks_allow_plaintext);
+        assert_eq!(
+            cfg.auth.mode(),
+            AuthMode::Jwks {
+                url: "https://idp.example/.well-known/jwks.json",
+                refresh: Duration::from_secs(900),
+            }
+        );
+    }
+
+    #[test]
+    fn jwks_refresh_defaults_to_an_hour() {
+        let c = jwks_auth("https://idp.example/jwks.json");
+        assert_eq!(c.jwks_refresh_secs, 3600);
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn auth_validate_rejects_two_key_sources_at_once() {
+        let mut c = jwks_auth("https://idp.example/jwks.json");
+        c.public_key_path = Some(PathBuf::from("/etc/ferriskv/idp.pub"));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn auth_validate_rejects_a_key_source_alongside_insecure() {
+        // Believing auth is on while it is off is worse than either state.
+        let mut c = jwks_auth("https://idp.example/jwks.json");
+        c.insecure = true;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn auth_validate_rejects_a_refresh_interval_that_polls_the_iam() {
+        let mut c = jwks_auth("https://idp.example/jwks.json");
+        c.jwks_refresh_secs = 1;
+        assert!(c.validate().is_err());
+        c.jwks_refresh_secs = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn auth_validate_refuses_a_plaintext_jwks_endpoint() {
+        // Whoever answers this URL decides which signatures the node trusts.
+        for url in [
+            "http://idp.example/jwks.json",
+            "http://10.0.0.5:8080/jwks.json",
+            "http://user@idp.example/jwks.json",
+        ] {
+            assert!(
+                jwks_auth(url).validate().is_err(),
+                "{url} should have been refused",
+            );
+        }
+    }
+
+    #[test]
+    fn auth_validate_allows_plaintext_on_loopback_for_development() {
+        for url in [
+            "http://localhost:8080/jwks.json",
+            "http://127.0.0.1:8080/realms/x/protocol/openid-connect/certs",
+            "http://[::1]:8080/jwks.json",
+        ] {
+            assert!(
+                jwks_auth(url).validate().is_ok(),
+                "{url} should have been allowed",
+            );
+        }
+    }
+
+    #[test]
+    fn auth_validate_allows_plaintext_when_a_sidecar_terminates_tls() {
+        let mut c = jwks_auth("http://idp.internal/jwks.json");
+        assert!(c.validate().is_err());
+        c.jwks_allow_plaintext = true;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn auth_validate_rejects_a_url_that_is_not_http() {
+        for url in ["file:///etc/keys.json", "idp.example/jwks.json", ""] {
+            assert!(
+                jwks_auth(url).validate().is_err(),
+                "{url} should have been refused",
+            );
+        }
     }
 
     #[test]

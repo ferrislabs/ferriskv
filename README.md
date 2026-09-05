@@ -72,7 +72,7 @@ Lexicographic order is preserved, so a tenant's data is one contiguous range and
 
 ## Current capabilities
 
-The server handles gRPC `get`, `put`, `delete`, streamed `scan`, and `batch`. Tenant isolation is enforced at the keyspace level. Two storage backends are configurable: an in-memory `DashMap` for development, or `fjall` for persistence. The write-ahead log on disk is replayed at boot: a torn tail left by an unclean exit is discarded, records are re-applied in write order, and the segment is rotated once storage confirms the data is durable. Configurable limits on key size, value size, batch size, and scan cap. Per-request TTL is enforced by an index-driven background sweeper. JWT authentication and per-RPC RBAC are enforced on every call. TLS is supported with configurable cert and key paths. The `Watch` RPC streams puts and deletes on a key prefix, including TTL evictions, with a heartbeat so a client can tell a quiet keyspace from a dead connection. Per-tenant quotas cap stored bytes and operations per second, administered over the admin server. A structured audit log records writes. An admin HTTP server exposes `/healthz`, `/readyz`, and Prometheus `/metrics`. Shutdown handles SIGINT and SIGTERM, drains in-flight requests, and flushes the WAL before exiting. The workspace currently has 224 tests covering the codec, the storage backends, the placement structure, the gRPC handlers, the TTL sweeper, and the auth primitives, plus property tests and five coverage-guided fuzz targets over the byte-parsers.
+The server handles gRPC `get`, `put`, `delete`, streamed `scan`, and `batch`. Tenant isolation is enforced at the keyspace level. Two storage backends are configurable: an in-memory `DashMap` for development, or `fjall` for persistence. The write-ahead log on disk is replayed at boot: a torn tail left by an unclean exit is discarded, records are re-applied in write order, and the segment is rotated once storage confirms the data is durable. Configurable limits on key size, value size, batch size, and scan cap. Per-request TTL is enforced by an index-driven background sweeper. JWT authentication and per-RPC RBAC are enforced on every call, with verification keys taken either from a public key on disk or from an IAM's JWKS endpoint, refreshed on a schedule and on demand as keys rotate. TLS is supported with configurable cert and key paths. The `Watch` RPC streams puts and deletes on a key prefix, including TTL evictions, with a heartbeat so a client can tell a quiet keyspace from a dead connection. Per-tenant quotas cap stored bytes and operations per second, administered over the admin server. A structured audit log records writes. An admin HTTP server exposes `/healthz`, `/readyz`, and Prometheus `/metrics`. Shutdown handles SIGINT and SIGTERM, drains in-flight requests, and flushes the WAL before exiting. The workspace currently has 260 tests covering the codec, the storage backends, the placement structure, the gRPC handlers, the TTL sweeper, and the auth primitives, plus property tests and five coverage-guided fuzz targets over the byte-parsers.
 
 ## What is not done yet
 
@@ -192,6 +192,46 @@ sleep 6
 ```
 
 The GC currently does a full keyspace scan per pass, which is fine for the scale targeted in P0. An indexed scan keyed by expiration time is planned for later.
+
+## Authentication
+
+Every RPC carries a `Bearer` token in the `authorization` metadata, and the claims decide which tenant the caller sees and which verbs it may use. Three ways to supply the verification key, mutually exclusive; the node refuses to start if more than one is set.
+
+**Nothing.** `insecure = true` trusts every caller and stamps requests as anonymous. Development only, and the node says so at startup on every boot.
+
+```toml
+[auth]
+insecure = true
+```
+
+**One public key.** An RS256 public key in PEM, read once at startup. Suited to a fixed signing key you rotate by restarting the node.
+
+```toml
+[auth]
+public_key_path = "/etc/ferriskv/idp.pub"
+```
+
+**A JWKS endpoint.** The node fetches the IAM's key set, indexes it by `kid`, and picks the key each token names. This is what to use with an IAM that rotates, [FerrisKey](https://github.com/ferrislabs/ferriskey) or Keycloak included.
+
+```toml
+[auth]
+jwks_url = "https://idp.example/realms/ferriskv/protocol/openid-connect/certs"
+jwks_refresh_secs = 3600
+```
+
+Rotation is picked up two ways. The refresher re-reads the endpoint every `jwks_refresh_secs` (default one hour, floor of 30 seconds), and a token naming a `kid` the node does not hold pulls the next fetch forward instead of waiting out the interval. That on-demand path is rate-limited to one fetch per 10 seconds: the `kid` comes from the token, so without a floor any caller could aim the node's outbound traffic at the IAM. The token that triggered the refresh is still rejected — its signature cannot be checked against a key the node does not have — so the effect is on how quickly the next caller succeeds.
+
+Failure modes are deliberate on both ends. If the endpoint is unreachable **at startup**, the node refuses to boot: one clear error beats a process that comes up healthy and answers every request with `unauthenticated`. If it becomes unreachable **later**, the keys already loaded stay in force and the failure is logged, so an IAM outage does not become a FerrisKV outage.
+
+Two kinds of published key are ignored, each with a warning naming the `kid`. Symmetric keys (`oct`, `HS*`) have no business in a document served to the world — the "secret" would be public, and anyone could mint a token. Key-transport algorithms (`RSA-OAEP`, `RSA1_5`) encrypt rather than sign. A key type the build does not recognise costs only itself, so upgrading the IAM never strands the node.
+
+The endpoint must be `https`. A plaintext JWKS endpoint hands whoever answers it the power to decide which signatures the node accepts, which is a complete authentication bypass. Loopback is exempt for local development. Where a service mesh terminates TLS at the sidecar and the plaintext hop is loopback in all but name, opt in explicitly:
+
+```toml
+[auth]
+jwks_url = "http://idp.internal/jwks.json"
+jwks_allow_plaintext = true
+```
 
 ## TLS
 

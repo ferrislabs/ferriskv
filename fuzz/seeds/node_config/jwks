@@ -1,0 +1,9 @@
+node_id = "node-0"
+listen = "0.0.0.0:7100"
+data_dir = "/tmp/ferriskv-node"
+coord_endpoints = []
+backend = "fjall"
+
+[auth]
+jwks_url = "https://idp.example/realms/ferriskv/protocol/openid-connect/certs"
+jwks_refresh_secs = 900

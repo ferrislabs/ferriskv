@@ -1,0 +1,8 @@
+node_id = "node-0"
+listen = "0.0.0.0:7100"
+data_dir = "/tmp/ferriskv-node"
+coord_endpoints = []
+
+[auth]
+public_key_path = "/etc/ferriskv/idp.pub"
+jwks_url = "https://idp.example/jwks.json"
