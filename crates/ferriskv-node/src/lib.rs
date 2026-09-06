@@ -6,9 +6,11 @@ pub mod grpc;
 pub mod service;
 pub mod ttl;
 pub mod wal;
+pub mod watch;
 
 pub use auth_layer::{AuthInterceptor, Principal};
 pub use config::NodeConfig;
 pub use grpc::GrpcApi;
 pub use service::NodeService;
 pub use wal::Wal;
+pub use watch::{ChangeKind, KeyChange, WatchHub};

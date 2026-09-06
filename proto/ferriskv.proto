@@ -166,10 +166,25 @@ message WatchRequest {
   bytes prefix = 2;
 }
 
+// What a WatchEvent reports. Named rather than a bare uint32 so a client
+// cannot silently mistake one kind for another, and so adding a kind later is
+// a visible change to the contract.
+enum WatchEventKind {
+  WATCH_EVENT_KIND_UNSPECIFIED = 0;
+  WATCH_EVENT_KIND_PUT = 1;
+  WATCH_EVENT_KIND_DELETE = 2;
+  // Sent when the stream has been idle, so a client can tell a quiet keyspace
+  // from a dead connection. Carries no key or value.
+  WATCH_EVENT_KIND_HEARTBEAT = 3;
+}
+
 message WatchEvent {
-  uint32 kind = 1;
+  WatchEventKind kind = 1;
   bytes key = 2;
+  // Empty for a delete and for a heartbeat.
   bytes value = 3;
+  // Always 0 until MVCC lands; kept in the contract so clients can start
+  // reading it without a wire change later.
   uint64 version = 4;
 }
 

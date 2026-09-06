@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ferriskv_core::{
-    Clock, FjallStorage, MemStorage, ScanIter, Storage, StorageBackend, ValueCodec,
+    Clock, FjallStorage, KeyCodec, MemStorage, ScanIter, Storage, StorageBackend, Subspace,
+    ValueCodec,
 };
 
 use crate::config::{Backend, NodeConfig};
 use crate::ttl::TtlIndex;
 use crate::wal::{Wal, WalOp, WalRecord};
+use crate::watch::{ChangeKind, KeyChange, WatchHub};
 
 pub struct NodeService {
     pub config: NodeConfig,
@@ -15,6 +17,7 @@ pub struct NodeService {
     pub wal: Arc<Wal>,
     pub clock: Clock,
     pub ttl_index: Arc<TtlIndex>,
+    pub watch: Arc<WatchHub>,
 }
 
 impl NodeService {
@@ -60,13 +63,50 @@ impl NodeService {
         let bootstrap = bootstrap_ttl_index(&storage, &ttl_index)?;
         tracing::info!(count = bootstrap, "ttl index bootstrapped");
 
+        // Nothing is watching a node that has only just opened, so replayed
+        // records deliberately publish nothing. A subscriber that connects later
+        // sees changes from that point on, not the log it missed.
+        let watch = Arc::new(WatchHub::new(config.watch_buffer));
+
         Ok(Self {
             config,
             storage,
             wal: Arc::new(wal),
             clock,
             ttl_index,
+            watch,
         })
+    }
+
+    /// Announces a committed change to whoever is watching the tenant it
+    /// belongs to.
+    ///
+    /// Called after storage has accepted the write, never before: a watcher must
+    /// not be able to observe a change that then fails to land.
+    fn publish_change(&self, encoded_key: &[u8], kind: ChangeKind, value: &[u8]) {
+        let Ok((tenant, subspace, payload)) = KeyCodec::decode(encoded_key) else {
+            // Every writer above encodes through KeyCodec, so this is a bug
+            // rather than bad input. Losing an event is preferable to failing a
+            // write that already committed.
+            tracing::warn!("watch: skipping a change whose key does not decode");
+            return;
+        };
+        // Watch is a contract about tenant data. Node bookkeeping in the other
+        // subspaces is not something a client asked to be told about.
+        if subspace != Subspace::Data {
+            return;
+        }
+        if !self.watch.is_watched(tenant) {
+            return;
+        }
+        self.watch.publish(
+            tenant,
+            KeyChange {
+                kind,
+                key: Bytes::copy_from_slice(payload),
+                value: Bytes::copy_from_slice(value),
+            },
+        );
     }
 
     /// Rotates the WAL once the segment grows past `wal_rotate_bytes`.
@@ -116,6 +156,7 @@ impl NodeService {
         if let Some(exp) = expires_at {
             self.ttl_index.schedule(Bytes::copy_from_slice(key), exp);
         }
+        self.publish_change(key, ChangeKind::Put, value);
         self.rotate_wal_if_needed();
         Ok(())
     }
@@ -136,6 +177,7 @@ impl NodeService {
     pub fn delete(&self, key: &[u8]) -> ferriskv_core::Result<()> {
         self.wal.append(WalOp::Delete, key, &[])?;
         self.storage.delete(key)?;
+        self.publish_change(key, ChangeKind::Delete, &[]);
         self.rotate_wal_if_needed();
         Ok(())
     }
@@ -220,6 +262,8 @@ mod tests {
             ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 5,
             wal_rotate_bytes: 64 * 1024 * 1024,
+            watch_buffer: 1024,
+            watch_heartbeat_secs: 30,
         }
     }
 
