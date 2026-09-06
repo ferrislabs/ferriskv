@@ -67,6 +67,19 @@ impl AuthConfig {
     }
 }
 
+/// Node-wide quota defaults, applied to any tenant without a record of its own.
+///
+/// Both fields default to `0`, meaning unlimited. A node that started enforcing
+/// a limit nobody configured would reject writes for reasons its operator never
+/// chose, so opting in is the only safe default.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct QuotaConfig {
+    #[serde(default)]
+    pub default_max_bytes: u64,
+    #[serde(default)]
+    pub default_max_ops_per_sec: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub node_id: Arc<str>,
@@ -87,6 +100,8 @@ pub struct NodeConfig {
     pub ttl_sweep_interval_secs: u64,
     #[serde(default = "default_shutdown_secs")]
     pub shutdown_timeout_secs: u64,
+    #[serde(default)]
+    pub quota: QuotaConfig,
     /// Events a Watch subscriber may fall behind by before its stream is
     /// terminated.
     ///
@@ -212,6 +227,7 @@ mod tests {
             ttl_sweep_interval_secs: 0,
             shutdown_timeout_secs: 10,
             wal_rotate_bytes: default_wal_rotate_bytes(),
+            quota: QuotaConfig::default(),
             watch_buffer: default_watch_buffer(),
             watch_heartbeat_secs: default_watch_heartbeat_secs(),
         }
@@ -234,6 +250,8 @@ mod tests {
         assert_eq!(cfg.wal_rotate_bytes, 64 * 1024 * 1024);
         assert_eq!(cfg.watch_buffer, 1024);
         assert_eq!(cfg.watch_heartbeat_secs, 30);
+        assert_eq!(cfg.quota.default_max_bytes, 0);
+        assert_eq!(cfg.quota.default_max_ops_per_sec, 0);
         assert!(!cfg.auth.insecure);
         assert!(cfg.tls.is_none());
     }
@@ -266,6 +284,45 @@ mod tests {
         );
         assert_eq!(cfg.watch_buffer, 64);
         assert_eq!(cfg.watch_heartbeat_secs, 5);
+    }
+
+    #[test]
+    fn parses_the_quota_section() {
+        let cfg = parse(
+            r#"
+            node_id = "n0"
+            listen = "127.0.0.1:7100"
+            data_dir = "/tmp/ferriskv-node"
+            coord_endpoints = []
+
+            [quota]
+            default_max_bytes = 1073741824
+            default_max_ops_per_sec = 500
+        "#,
+        );
+        assert_eq!(cfg.quota.default_max_bytes, 1024 * 1024 * 1024);
+        assert_eq!(cfg.quota.default_max_ops_per_sec, 500);
+    }
+
+    #[test]
+    fn quotas_default_to_unlimited_when_the_section_is_absent() {
+        // Enforcing a limit nobody configured would reject writes for reasons
+        // the operator never chose.
+        let cfg = parse(
+            r#"
+            node_id = "n0"
+            listen = "127.0.0.1:7100"
+            data_dir = "/tmp/ferriskv-node"
+            coord_endpoints = []
+        "#,
+        );
+        assert_eq!(cfg.quota.default_max_bytes, 0);
+        assert_eq!(cfg.quota.default_max_ops_per_sec, 0);
+        // Unlimited must also be a valid configuration, not merely the parsed
+        // default.
+        let mut valid = base_cfg();
+        valid.quota = cfg.quota;
+        assert!(valid.validate().is_ok());
     }
 
     #[test]

@@ -72,7 +72,7 @@ Lexicographic order is preserved, so a tenant's data is one contiguous range and
 
 ## Current capabilities
 
-The server handles gRPC `get`, `put`, `delete`, streamed `scan`, and `batch`. Tenant isolation is enforced at the keyspace level. Two storage backends are configurable: an in-memory `DashMap` for development, or `fjall` for persistence. The write-ahead log on disk is replayed at boot: a torn tail left by an unclean exit is discarded, records are re-applied in write order, and the segment is rotated once storage confirms the data is durable. Configurable limits on key size, value size, batch size, and scan cap. Per-request TTL is enforced by an index-driven background sweeper. JWT authentication and per-RPC RBAC are enforced on every call. TLS is supported with configurable cert and key paths. The `Watch` RPC streams puts and deletes on a key prefix, including TTL evictions, with a heartbeat so a client can tell a quiet keyspace from a dead connection. A structured audit log records writes. An admin HTTP server exposes `/healthz`, `/readyz`, and Prometheus `/metrics`. Shutdown handles SIGINT and SIGTERM, drains in-flight requests, and flushes the WAL before exiting. The workspace currently has 171 tests covering the codec, the storage backends, the placement structure, the gRPC handlers, the TTL sweeper, and the auth primitives, plus property tests and five coverage-guided fuzz targets over the byte-parsers.
+The server handles gRPC `get`, `put`, `delete`, streamed `scan`, and `batch`. Tenant isolation is enforced at the keyspace level. Two storage backends are configurable: an in-memory `DashMap` for development, or `fjall` for persistence. The write-ahead log on disk is replayed at boot: a torn tail left by an unclean exit is discarded, records are re-applied in write order, and the segment is rotated once storage confirms the data is durable. Configurable limits on key size, value size, batch size, and scan cap. Per-request TTL is enforced by an index-driven background sweeper. JWT authentication and per-RPC RBAC are enforced on every call. TLS is supported with configurable cert and key paths. The `Watch` RPC streams puts and deletes on a key prefix, including TTL evictions, with a heartbeat so a client can tell a quiet keyspace from a dead connection. Per-tenant quotas cap stored bytes and operations per second, administered over the admin server. A structured audit log records writes. An admin HTTP server exposes `/healthz`, `/readyz`, and Prometheus `/metrics`. Shutdown handles SIGINT and SIGTERM, drains in-flight requests, and flushes the WAL before exiting. The workspace currently has 221 tests covering the codec, the storage backends, the placement structure, the gRPC handlers, the TTL sweeper, and the auth primitives, plus property tests and five coverage-guided fuzz targets over the byte-parsers.
 
 ## What is not done yet
 
@@ -125,10 +125,45 @@ admin_listen = "127.0.0.1:7101"
 - `GET /healthz` returns `200 OK` while the process is alive.
 - `GET /readyz` returns `200 OK` when the storage engine answers a probe read, `503` otherwise.
 - `GET /metrics` returns Prometheus text format with RPC latencies and counters, value size histograms, and audit event counts.
+- `GET /quotas` lists every tenant the node knows about, with its usage and limits.
+- `GET /quotas/<tenant>` reports one tenant. An unknown tenant answers with zero usage and the node defaults rather than `404`, because that is its true state.
+- `PUT /quotas/<tenant>` sets limits. Fields are optional, so raising a byte cap does not require restating the rate limit.
+- `DELETE /quotas/<tenant>` removes a tenant's own limits, returning it to the node defaults.
 
 Bind to `127.0.0.1` (the default convention) so the routes stay reachable only from the same host: Kubernetes probes, sidecars and local agents have access, the outside network does not. If you genuinely need cross-host scraping, switch to `0.0.0.0` and pair it with a `NetworkPolicy` or firewall rule. The server logs a warning at startup when it binds outside loopback.
 
 Leaving `admin_listen` unset disables the admin server entirely.
+
+## Quotas
+
+Two limits per tenant: stored bytes, and operations per second. `0` means unlimited, and unlimited is the default — a node should not enforce a limit its operator never chose.
+
+Node-wide defaults live in `node.toml` and apply to any tenant without a record of its own:
+
+```toml
+[quota]
+default_max_bytes = 1073741824
+default_max_ops_per_sec = 500
+```
+
+Per-tenant overrides go through the admin server and persist in the tenant's `metadata` subspace:
+
+```sh
+curl -X PUT localhost:7101/quotas/alice \
+  -H 'content-type: application/json' \
+  -d '{"max_bytes": 4294967296, "max_ops_per_sec": 2000}'
+
+curl localhost:7101/quotas/alice
+# {"tenant":"alice","used_bytes":15,"max_bytes":4294967296,"max_ops_per_sec":2000}
+```
+
+A write that would take a tenant over its byte cap is refused with `ResourceExhausted`, and nothing is written — a quota refusal is never a partial success. A write that *frees* bytes is always allowed, even for a tenant already over its limit, since that is the only way such a tenant can get back under it.
+
+**What counts as a byte:** the caller's key plus the caller's value. Not the encoded key, because the tenant-name length prefix and the subspace byte are the node's framing and nobody should be billed for the length of their own name. Not the storage engine's on-disk footprint either, because that moves with compaction and a quota that drifts under the tenant's feet is not a quota.
+
+**Where usage lives:** an in-memory counter is what writes are checked against, and it is materialised into the tenant's `stats` subspace so an operator or a billing job can read it without asking the node. Startup recomputes it by scanning the real data rather than trusting the stored total — that scan happens anyway for the TTL index, and it means any drift is corrected at the next boot instead of compounding.
+
+Rate limiting is admission control: it runs before any storage access, and it covers reads as well as writes, because a tenant can saturate a node with `scan` just as effectively as with `put`. A `batch` costs one operation per op it contains, so batching cannot be used to bypass the limit.
 
 ## TTL
 
