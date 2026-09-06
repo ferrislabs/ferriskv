@@ -1,0 +1,56 @@
+[package]
+name = "ferriskv-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+config = { version = "0.15", features = ["toml"] }
+ferriskv-core = { path = "../crates/ferriskv-core" }
+ferriskv-node = { path = "../crates/ferriskv-node" }
+
+# The workspace sets `panic = "abort"` in release, which libFuzzer cannot use:
+# it needs to unwind to report a crash rather than take the process down.
+[profile.release]
+panic = "unwind"
+debug = 1
+
+[[bin]]
+name = "key_decode"
+path = "fuzz_targets/key_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_roundtrip"
+path = "fuzz_targets/key_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "value_decode"
+path = "fuzz_targets/value_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_frame"
+path = "fuzz_targets/wal_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_config"
+path = "fuzz_targets/node_config.rs"
+test = false
+doc = false
+bench = false

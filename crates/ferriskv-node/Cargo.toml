@@ -39,3 +39,4 @@ metrics-exporter-prometheus = { workspace = true }
 jsonwebtoken = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+proptest = { workspace = true }
