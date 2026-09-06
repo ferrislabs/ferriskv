@@ -233,10 +233,17 @@ impl NodeService {
         }))
     }
 
-    /// Works out what deleting `encoded_key` frees, if anything.
-    fn plan_delete_accounting(
+    /// Works out what dropping an entry gives back to its tenant.
+    ///
+    /// Takes the stored bytes rather than re-reading them, so the caller's
+    /// existence check and this accounting describe the same instant. `None`
+    /// means the key is not tenant data — which is not the same thing as the key
+    /// being absent, and conflating the two is how a `delete` of a metadata key
+    /// ends up reporting that it removed nothing.
+    fn plan_release(
         &self,
         encoded_key: &[u8],
+        raw: &[u8],
     ) -> ferriskv_core::Result<Option<Accounting>> {
         let Ok((tenant, subspace, payload)) = KeyCodec::decode(encoded_key) else {
             return Ok(None);
@@ -244,10 +251,7 @@ impl NodeService {
         if subspace != Subspace::Data {
             return Ok(None);
         }
-        let Some(raw) = self.storage.get(encoded_key)? else {
-            return Ok(None);
-        };
-        let freed = entry_bytes(payload.len(), ValueCodec::payload_len(&raw)?);
+        let freed = entry_bytes(payload.len(), ValueCodec::payload_len(raw)?);
         Ok(Some(Accounting {
             tenant: Arc::<str>::from(tenant),
             delta: -(freed as i64),
@@ -284,14 +288,45 @@ impl NodeService {
         }
     }
 
-    pub fn delete(&self, key: &[u8]) -> ferriskv_core::Result<()> {
-        let accounting = self.plan_delete_accounting(key)?;
+    /// Removes `key`, reporting whether it held a value.
+    ///
+    /// # The flag is best-effort, and cannot be made exact here
+    ///
+    /// The answer comes from a read that precedes the removal, so it describes
+    /// the key at the moment of that read rather than at the moment of the
+    /// removal. Two callers deleting the same key concurrently can both be told
+    /// `true`, and a caller can be told `false` for a key another writer created
+    /// a microsecond earlier.
+    ///
+    /// Returning it anyway is deliberate: it is right in the single-writer case
+    /// that covers most callers, and dropping it would remove information
+    /// without making anything safer. What is not acceptable is a caller
+    /// treating it as a guarantee — deciding "I am the one who deleted it" and
+    /// acting on that — so both this method and `DeleteRequest` in the proto say
+    /// so plainly.
+    ///
+    /// Making it exact needs an atomic remove-and-return. `MemStorage` has one
+    /// for free, since `DashMap::remove` hands back the old value; fjall does
+    /// not, short of a transaction. Implementing it for one backend would make
+    /// the semantics differ by backend, which is worse than a documented
+    /// approximation. It becomes exact when the transactional layer lands (#23).
+    pub fn delete(&self, key: &[u8]) -> ferriskv_core::Result<bool> {
+        // One read serves two purposes: the byte count the quota needs, and the
+        // caller's flag. Deriving both from it is not merely cheaper — a second
+        // read would be a second point in time, and the two answers could
+        // disagree about the same delete.
+        let existing = self.storage.get(key)?;
+        let accounting = match &existing {
+            Some(raw) => self.plan_release(key, raw)?,
+            None => None,
+        };
+        let existed = existing.is_some();
         self.wal.append(WalOp::Delete, key, &[])?;
         self.storage.delete(key)?;
         self.commit_accounting(accounting);
         self.publish_change(key, ChangeKind::Delete, &[]);
         self.rotate_wal_if_needed();
-        Ok(())
+        Ok(existed)
     }
 
     pub fn scan(&self, prefix: &[u8]) -> ferriskv_core::Result<ScanIter> {
@@ -707,6 +742,57 @@ mod tests {
 
         svc.put_with_ttl(&key, &[b'x'; 50], 0).unwrap();
         assert_eq!(svc.quotas.used_bytes("alice"), 51);
+    }
+
+    #[test]
+    fn delete_reports_whether_the_key_held_a_value() {
+        let dir = TempDir::new().unwrap();
+        let svc = NodeService::open(config(&dir, Backend::Memory)).unwrap();
+        let key = data_key("alice", b"k");
+
+        assert!(!svc.delete(&key).unwrap(), "nothing there to find");
+        svc.put_with_ttl(&key, b"v", 0).unwrap();
+        assert!(svc.delete(&key).unwrap());
+        assert!(
+            !svc.delete(&key).unwrap(),
+            "the second delete finds nothing"
+        );
+    }
+
+    #[test]
+    fn delete_reports_a_removal_outside_the_data_subspace() {
+        // The accounting plan is `None` for a key that is not tenant data, and
+        // for a key that is absent. Deriving the flag from it would conflate the
+        // two and report that deleting a metadata key removed nothing.
+        let dir = TempDir::new().unwrap();
+        let svc = NodeService::open(config(&dir, Backend::Memory)).unwrap();
+        let key = KeyCodec::encode("alice", Subspace::Metadata, b"schema").unwrap();
+
+        svc.put_with_ttl(&key, b"{}", 0).unwrap();
+        assert!(
+            svc.delete(&key).unwrap(),
+            "the key was there and was removed, whatever subspace it was in",
+        );
+        assert_eq!(svc.quotas.used_bytes("alice"), 0);
+    }
+
+    #[test]
+    fn delete_reports_an_expired_key_as_present() {
+        // Honest rather than convenient: the entry is still in storage and this
+        // delete is what removes it. Reporting `false` would say nothing was
+        // removed while the bytes were being given back, and the two answers
+        // would contradict each other.
+        let dir = TempDir::new().unwrap();
+        let clock = Clock::manual(0);
+        let svc =
+            NodeService::open_with_clock(config(&dir, Backend::Memory), clock.clone()).unwrap();
+        let key = data_key("alice", b"gone");
+        svc.put_with_ttl(&key, b"v", 100).unwrap();
+        clock.advance(500);
+
+        assert!(svc.get(&key).unwrap().is_none(), "invisible to reads");
+        assert!(svc.delete(&key).unwrap());
+        assert_eq!(svc.quotas.used_bytes("alice"), 0);
     }
 
     #[test]

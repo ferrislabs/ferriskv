@@ -143,6 +143,19 @@ message DeleteRequest {
 }
 
 message DeleteResponse {
+  // Whether the key held a value. Best-effort, and safe to log or display but
+  // not to branch on.
+  //
+  // The server reads the key and removes it as two steps, so this describes the
+  // key at the moment of the read rather than at the moment of the removal. Two
+  // clients deleting the same key concurrently can both be told true, and a
+  // client can be told false for a key another writer created a moment earlier.
+  //
+  // Do not use it to decide "I am the one who deleted it" — as a lock, a
+  // once-only trigger, or a claim on a work item. There is no way to make that
+  // safe until the transactional layer lands, and until then a client that
+  // relies on it has a race it cannot see. Both deletes succeed either way; only
+  // the answer about who found it is approximate.
   bool found = 1;
 }
 
